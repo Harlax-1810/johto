@@ -268,3 +268,51 @@ class Resume(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+WRAPPER = Path(__file__).resolve().parents[1] / "bin" / "mercor-prework"
+# Prints what main() saw, whether run as a script (slot 0) or loaded by prework_slot (slot 1).
+WRAPPED_PREWORK = FAKE_PREWORK + textwrap.dedent('''
+    import json
+    def main(argv=None):
+        print(json.dumps({"argv": list(argv), "ports": [list(r) for r in LANE_PORT_RANGES]}))
+    if __name__ == "__main__":
+        main(sys.argv[1:])
+''')
+
+
+class Wrapper(unittest.TestCase):
+    """bin/mercor-prework: prework.py as-is for the first lane, through prework_slot.py for the second."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.prework = Path(self.tmp.name) / "prework.py"
+        self.prework.write_text(WRAPPED_PREWORK)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_wrapper(self, *args, **env):
+        e = {k: v for k, v in os.environ.items() if k not in ("PREWORK_PORT_SLOT", "JOHTO_PREWORK_SLOT")}
+        e.update({"PREWORK_PY": str(self.prework), **env})
+        return subprocess.run([str(WRAPPER), *args], env=e, capture_output=True, text=True)
+
+    def test_first_lane_runs_prework_unchanged(self):
+        r = self.run_wrapper("collect")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"argv": ["collect"],
+                                                "ports": [["3000-3019", "34000-34019"], ["8000-8009", "35000-35009"]]})
+
+    def test_second_lane_goes_through_prework_slot(self):
+        r = self.run_wrapper("setup", "--task", "Task x", PREWORK_PORT_SLOT="1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(json.loads(r.stdout), {"argv": ["setup", "--task", "Task x"],
+                                                "ports": [["3000-3019", "36000-36019"], ["8000-8009", "37000-37009"]]})
+
+    def test_missing_files_are_refused_in_plain_words(self):
+        r = self.run_wrapper("collect", PREWORK_PORT_SLOT="1", JOHTO_PREWORK_SLOT="/nonexistent/prework_slot.py")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("needs prework_slot.py", r.stderr)
+        r = self.run_wrapper("collect", PREWORK_PY="/nonexistent/prework.py")
+        self.assertEqual(r.returncode, 2)
+        self.assertIn("no prework.py", r.stderr)

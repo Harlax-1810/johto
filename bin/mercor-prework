@@ -1,0 +1,34 @@
+#!/bin/sh
+# The `mercor-prework` command johto runs for every lane setup and collect. Install it on PATH, and at
+# ~/.local/bin/mercor-prework on any machine that runs lanes over SSH.
+#
+# It runs Mercor's prework.py unchanged. With PREWORK_PORT_SLOT=1 it runs prework.py through
+# johto/prework_slot.py instead, which gives a second lane its own host ports and CPUs.
+#
+# Environment:
+#   PREWORK_PY          Mercor's prework.py (default ~/.local/share/mercor-prework/prework-v2/prework.py)
+#   PREWORK_IMAGE_FILE  the pinned lane image tarball, when prework.py should load it from a file
+#   PREWORK_PORT_SLOT   0 or unset for the first lane, 1 for a second lane on this machine
+#   JOHTO_PREWORK_SLOT  prework_slot.py (default: johto/prework_slot.py in this checkout, else
+#                       ~/.local/share/mercor-prework/prework_slot.py on a machine with no checkout)
+PREWORK_PY="${PREWORK_PY:-$HOME/.local/share/mercor-prework/prework-v2/prework.py}"
+if [ ! -f "$PREWORK_PY" ]; then
+  echo "mercor-prework: no prework.py at $PREWORK_PY (set PREWORK_PY)" >&2
+  exit 2
+fi
+
+if [ -n "${PREWORK_PORT_SLOT:-}" ] && [ "$PREWORK_PORT_SLOT" != 0 ]; then
+  slot_py="${JOHTO_PREWORK_SLOT:-}"
+  if [ -z "$slot_py" ]; then
+    here="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
+    slot_py="$here/johto/prework_slot.py"
+    [ -f "$slot_py" ] || slot_py="$HOME/.local/share/mercor-prework/prework_slot.py"
+  fi
+  if [ ! -f "$slot_py" ]; then
+    echo "mercor-prework: PREWORK_PORT_SLOT=$PREWORK_PORT_SLOT needs prework_slot.py, which isn't at $slot_py" \
+         "(set JOHTO_PREWORK_SLOT)" >&2
+    exit 2
+  fi
+  exec python3 -I "$slot_py" "$PREWORK_PY" "$PREWORK_PORT_SLOT" "$@"
+fi
+exec python3 "$PREWORK_PY" "$@"
