@@ -1,0 +1,6 @@
+#!/bin/sh
+# Run the johto CLI from this checkout without installing it (uses .venv when present).
+here="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
+py=python3
+[ -x "$here/.venv/bin/python" ] && py="$here/.venv/bin/python"
+PYTHONPATH="$here${PYTHONPATH:+:$PYTHONPATH}" exec "$py" -m johto.cli "$@"

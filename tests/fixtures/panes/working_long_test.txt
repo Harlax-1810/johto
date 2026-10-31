@@ -1,0 +1,15 @@
+ ▐▛███▛█   Claude Code v2.1.311
+▝▜██████▀  Opus 5.5 with high effort · Claude Max
+ ▝▝   ▝▝   /exp/PREWORK_zz01/model_a
+
+❯ the lock endpoint should 404 when the room isn't loaded
+
+⏺ Bash(go test ./room/ ./server/ -run TestLock -count=1)
+  ⎿  Running…
+
+✻ Percolating… (2m 13s · ↓ 4.1k tokens · esc to interrupt)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

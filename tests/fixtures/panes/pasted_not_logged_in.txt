@@ -1,0 +1,32 @@
+ ▐▛███▛█   Claude Code v2.1.311
+▝▜██████▀  Opus 5.5 with high effort · API Usage Billing
+ ▝▝   ▝▝   /work
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ hello there
+  second line of my prompt
+  third
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)                                  Not logged in · Run /login
+                                                                                  ● high · /effort
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

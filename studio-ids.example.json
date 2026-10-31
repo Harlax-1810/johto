@@ -1,0 +1,14 @@
+{
+  "browser_account": "you@example.com",
+  "writer_name": "Your Name",
+  "campaign_id": "camp_...",
+  "company_id": "comp_...",
+  "account_id": "acct_...",
+  "world_id": "world_...",
+  "status": {
+    "not_ready": "<uuid>", "ready": "<uuid>", "writing": "<uuid>", "awaiting_review": "<uuid>",
+    "in_review": "<uuid>", "accepted": "<uuid>", "rejected": "<uuid>"
+  },
+  "qc_specs": {"AutoQC": "qcspec_...", "Codebase Check": "qcspec_..."},
+  "discard_form": "https://docs.google.com/forms/d/e/.../viewform"
+}

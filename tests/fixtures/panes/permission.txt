@@ -1,0 +1,13 @@
+⏺ Bash(rm -rf node_modules && npm ci)
+  ⎿  Waiting…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+ Bash command
+
+   rm -rf node_modules && npm ci
+   Reinstall dependencies
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for npm ci commands in /exp/PREWORK_zz01/model_a
+   3. No, and tell Claude what to do differently (esc)

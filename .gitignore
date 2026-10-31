@@ -1,0 +1,14 @@
+# Private: Studio ids, caches, claimed tasks and research
+studio-ids.json
+data/
+tasks/
+research/
+CLAUDE.local.md
+.claude/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.ruff_cache/
+*.egg-info/

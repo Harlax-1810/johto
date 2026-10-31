@@ -1,0 +1,7 @@
+⏺ Before I wire this into the API: should locking a room that isn't loaded yet load it first,
+  or return 404 like the user endpoints do?
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ return 404, same as the users endpoint
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)

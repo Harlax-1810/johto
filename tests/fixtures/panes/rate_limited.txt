@@ -1,0 +1,9 @@
+⏺ Running the full suite again.
+
+  ⎿  5-hour limit reached · resets 3pm (UTC)
+     /upgrade to increase your usage limit.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle)
