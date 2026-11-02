@@ -30,7 +30,18 @@ START = %(start)r
 tabs = [t for t in list_tabs(include_chrome=False)
         if (t.get("url") or "").startswith("https://studio.mercor.com")
         and t.get("account") in (None, ACCOUNT)]
-T = tabs[0]["targetId"] if tabs else None
+# Use a tab that is signed in: a tab left on Studio's sign-in page has no session even when another tab has one
+# (2026-11-01, every read failed that way). With none signed in, the first tab shows why.
+T = None
+for t in sorted(tabs, key=lambda t: "/sign-in" in (t.get("url") or "")):
+    try:
+        if js("!!(window.Clerk && window.Clerk.session)", target_id=t["targetId"]):
+            T = t["targetId"]
+            break
+    except Exception:
+        pass
+if T is None and tabs:
+    T = next((t["targetId"] for t in tabs if "/sign-in" not in (t.get("url") or "")), tabs[0]["targetId"])
 if T is None:
     T = new_tab(START, account=ACCOUNT)
     if isinstance(T, dict):

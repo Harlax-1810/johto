@@ -32,24 +32,32 @@ export function runOf(task, item, kind) {
 export const mmss = (s) => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, "0")}`;
 export const runName = (run) => run ? `${run.kind === "calib" ? "calibration" : "validation"} ${run.n}` : "";
 
-/** The run Studio gets: the one Austin chose (task.json submission_run), else the newest collected validation run. */
+const runNameOf = (c) => c ? (typeof c === "string" ? c : c.run || c.name || null) : null;
+
+/**
+ * The run Studio gets, as the server resolved it (actions.submission_run: the one Austin chose, else the newest
+ * collected validation run). Only task data without that field falls back to the same rule here.
+ */
 export function submissionRun(task) {
-  const c = task?.submission_run ?? task?.summary?.submission_run;
-  if (c) return typeof c === "string" ? c : c.run || c.name || null;
+  if (task && ("submission_run" in task || "submission_run" in (task.summary || {}))) {
+    return runNameOf(task.submission_run ?? task.summary?.submission_run);
+  }
   const v = (task?.runs || []).filter((r) => r.kind === "validate" && (r.collected_at || r.state === "collected"));
   return v.length ? v[v.length - 1].name : null;
 }
-export const chosenRun = (task) => {
-  const c = task?.submission_run ?? task?.summary?.submission_run;
-  return c ? (typeof c === "string" ? c : c.run || c.name || null) : null;
-};
+/** The run Austin chose himself (task.json submission_run), or null when the default rule picks it. */
+export const chosenRun = (task) => runNameOf(task?.submission_run_chosen ?? task?.summary?.submission_run_chosen);
 export const collectedRuns = (task) => (task?.runs || []).filter((r) => r.collected_at || r.state === "collected");
 
 /** Choose which run is submitted (null: back to the newest validation run). */
 export async function chooseRun(short, run, label) {
   try {
     const r = await api.send("POST", `/api/tasks/${short}/submission-run`, { run });
-    patchTask(short, (t) => { t.submission_run = run; if (t.summary) t.summary.submission_run = run; });
+    patchTask(short, (t) => {
+      t.submission_run_chosen = run;
+      if (t.summary) t.summary.submission_run_chosen = run;
+      if (run) { t.submission_run = run; if (t.summary) t.summary.submission_run = run; }
+    });
     report(r, run ? `Studio gets ${label || run} when you submit` : "Studio gets the validation run when you submit");
     loadTask(short, true).catch(() => {});
     return r;
@@ -338,7 +346,7 @@ export function decideRule(f, enterprise) {
   const t = f?.tests || {};
   const drop = [
     { ok: f?.turns === 1, text: "1 turn" },
-    { ok: f?.active_min != null && f.active_min < 10, text: "under 10 active min" },
+    { ok: f?.active_min != null && f.active_min < 10, text: "under 10 working min" },
     { ok: !!(t.last_ok && t.after_last_edit), text: "last test passed after the last edit" },
   ];
   const keep = [
@@ -356,7 +364,7 @@ export function decideRule(f, enterprise) {
 function TimeBar({ active, wall, enterprise }) {
   const max = Math.max(35, Math.ceil(((wall || 0) + 5) / 5) * 5);
   const pct = (m) => `${Math.min(100, (m / max) * 100)}%`;
-  return html`<div class="dec-bar" aria-label=${`${mins(active)} active minutes of ${mins(wall)} wall minutes`}>
+  return html`<div class="dec-bar" aria-label=${`${mins(active)} working minutes of ${mins(wall)} wall minutes`}>
     <div class="track">
       <span class="wall" style=${{ width: pct(wall || 0) }}></span>
       <span class="act" style=${{ width: pct(active || 0) }}></span>

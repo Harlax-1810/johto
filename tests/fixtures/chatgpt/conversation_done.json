@@ -1,0 +1,371 @@
+{
+  "title": "Johto review · t4sk0002 validate-1 turn 1",
+  "create_time": 1761973200.25,
+  "update_time": 1761974063.25,
+  "mapping": {
+    "client-created-root": {
+      "id": "client-created-root",
+      "message": null,
+      "parent": null,
+      "children": [
+        "8f0c1d2e-0000-4000-8000-000000000001"
+      ]
+    },
+    "8f0c1d2e-0000-4000-8000-000000000001": {
+      "id": "8f0c1d2e-0000-4000-8000-000000000001",
+      "message": {
+        "id": "8f0c1d2e-0000-4000-8000-000000000001",
+        "author": {
+          "role": "system",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": null,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            ""
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {
+          "is_visually_hidden_from_conversation": true
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "client-created-root",
+      "children": [
+        "8f0c1d2e-0000-4000-8000-000000000002"
+      ]
+    },
+    "8f0c1d2e-0000-4000-8000-000000000002": {
+      "id": "8f0c1d2e-0000-4000-8000-000000000002",
+      "message": {
+        "id": "8f0c1d2e-0000-4000-8000-000000000002",
+        "author": {
+          "role": "user",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": null,
+        "update_time": null,
+        "content": {
+          "content_type": "user_editable_context",
+          "user_profile": "",
+          "user_instructions": ""
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "is_visually_hidden_from_conversation": true,
+          "user_context_message_data": {
+            "about_user_message": ""
+          }
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "8f0c1d2e-0000-4000-8000-000000000001",
+      "children": [
+        "a1b2c3d4-1111-4111-8111-000000000010",
+        "b2c3d4e5-2222-4222-8222-000000000020"
+      ]
+    },
+    "a1b2c3d4-1111-4111-8111-000000000010": {
+      "id": "a1b2c3d4-1111-4111-8111-000000000010",
+      "message": {
+        "id": "a1b2c3d4-1111-4111-8111-000000000010",
+        "author": {
+          "role": "user",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761973200.25,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "Reply with exactly this title and nothing else: Johto review · t4sk0002 validate-1 turn 1"
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "selected_github_repos": [],
+          "serialization_metadata": {
+            "custom_symbol_offsets": []
+          }
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "8f0c1d2e-0000-4000-8000-000000000002",
+      "children": [
+        "a1b2c3d4-1111-4111-8111-000000000011"
+      ]
+    },
+    "a1b2c3d4-1111-4111-8111-000000000011": {
+      "id": "a1b2c3d4-1111-4111-8111-000000000011",
+      "message": {
+        "id": "a1b2c3d4-1111-4111-8111-000000000011",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761973202.35,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "Johto review · t4sk0002 validate-1 turn 1"
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {
+          "model_slug": "gpt-5-5-instant",
+          "finish_details": {
+            "type": "stop",
+            "stop_tokens": [
+              200002
+            ]
+          }
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "a1b2c3d4-1111-4111-8111-000000000010",
+      "children": []
+    },
+    "b2c3d4e5-2222-4222-8222-000000000020": {
+      "id": "b2c3d4e5-2222-4222-8222-000000000020",
+      "message": {
+        "id": "b2c3d4e5-2222-4222-8222-000000000020",
+        "author": {
+          "role": "user",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761973240.25,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "# How to use this pack\n\nYou are pre-grading one run of Claude Code ... (pack text, 705k characters in the real send)"
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "model_slug": "gpt-5-5-pro"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "8f0c1d2e-0000-4000-8000-000000000002",
+      "children": [
+        "c3d4e5f6-3333-4333-8333-000000000030"
+      ]
+    },
+    "c3d4e5f6-3333-4333-8333-000000000030": {
+      "id": "c3d4e5f6-3333-4333-8333-000000000030",
+      "message": {
+        "id": "c3d4e5f6-3333-4333-8333-000000000030",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761973255.25,
+        "update_time": null,
+        "content": {
+          "content_type": "thoughts",
+          "thoughts": [
+            {
+              "summary": "Reading the batch path",
+              "content": "The filter can shorten a page ...",
+              "finished": true
+            }
+          ],
+          "source_analysis_msg_id": "c3d4e5f6-3333-4333-8333-0000000000ff"
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "model_slug": "gpt-5-5-pro",
+          "reasoning_status": "is_reasoning"
+        },
+        "recipient": "all",
+        "channel": "analysis"
+      },
+      "parent": "b2c3d4e5-2222-4222-8222-000000000020",
+      "children": [
+        "c3d4e5f6-3333-4333-8333-000000000031"
+      ]
+    },
+    "c3d4e5f6-3333-4333-8333-000000000031": {
+      "id": "c3d4e5f6-3333-4333-8333-000000000031",
+      "message": {
+        "id": "c3d4e5f6-3333-4333-8333-000000000031",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761973500.25,
+        "update_time": null,
+        "content": {
+          "content_type": "code",
+          "language": "unknown",
+          "text": "print(3/5)"
+        },
+        "status": "finished_successfully",
+        "end_turn": false,
+        "weight": 1.0,
+        "metadata": {
+          "model_slug": "gpt-5-5-pro"
+        },
+        "recipient": "python",
+        "channel": "analysis"
+      },
+      "parent": "c3d4e5f6-3333-4333-8333-000000000030",
+      "children": [
+        "c3d4e5f6-3333-4333-8333-000000000032"
+      ]
+    },
+    "c3d4e5f6-3333-4333-8333-000000000032": {
+      "id": "c3d4e5f6-3333-4333-8333-000000000032",
+      "message": {
+        "id": "c3d4e5f6-3333-4333-8333-000000000032",
+        "author": {
+          "role": "tool",
+          "name": "python",
+          "metadata": {}
+        },
+        "create_time": 1761973501.25,
+        "update_time": null,
+        "content": {
+          "content_type": "execution_output",
+          "text": "0.6"
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "aggregate_result": {
+            "status": "success"
+          }
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "c3d4e5f6-3333-4333-8333-000000000031",
+      "children": [
+        "c3d4e5f6-3333-4333-8333-000000000033"
+      ]
+    },
+    "c3d4e5f6-3333-4333-8333-000000000033": {
+      "id": "c3d4e5f6-3333-4333-8333-000000000033",
+      "message": {
+        "id": "c3d4e5f6-3333-4333-8333-000000000033",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761974062.25,
+        "update_time": null,
+        "content": {
+          "content_type": "reasoning_recap",
+          "content": "Thought for 13m 42s"
+        },
+        "status": "finished_successfully",
+        "end_turn": null,
+        "weight": 1.0,
+        "metadata": {
+          "model_slug": "gpt-5-5-pro",
+          "reasoning_status": "reasoning_ended"
+        },
+        "recipient": "all",
+        "channel": null
+      },
+      "parent": "c3d4e5f6-3333-4333-8333-000000000032",
+      "children": [
+        "d4e5f6a7-4444-4444-8444-000000000040"
+      ]
+    },
+    "d4e5f6a7-4444-4444-8444-000000000040": {
+      "id": "d4e5f6a7-4444-4444-8444-000000000040",
+      "message": {
+        "id": "d4e5f6a7-4444-4444-8444-000000000040",
+        "author": {
+          "role": "assistant",
+          "name": null,
+          "metadata": {}
+        },
+        "create_time": 1761974063.25,
+        "update_time": null,
+        "content": {
+          "content_type": "text",
+          "parts": [
+            "## Task Success — missed correctness issues\n\n### 1. The last batch can be dropped\n\n**References:** `app/export/batches.py:120–141`. citeturn0file3\n\n- `next_batch` counts rows before the filter runs.\n- The caller stops on a short page, so a filtered page ends the export early.\n\n**Case checked:**\n\n| Input / result | Value |\n|---|---|\n| Rows | `250` |\n| Batch size | `100` |\n| Rows shipped | `200` |\n\nCalculated share: `3/5 = 0.6`.\n"
+          ]
+        },
+        "status": "finished_successfully",
+        "end_turn": true,
+        "weight": 1.0,
+        "metadata": {
+          "model_slug": "gpt-5-5-pro",
+          "finish_details": {
+            "type": "stop",
+            "stop_tokens": [
+              200002
+            ]
+          },
+          "citations": [],
+          "content_references": [
+            {
+              "matched_text": "citeturn0file3",
+              "type": "file"
+            }
+          ]
+        },
+        "recipient": "all",
+        "channel": "final"
+      },
+      "parent": "c3d4e5f6-3333-4333-8333-000000000033",
+      "children": []
+    }
+  },
+  "moderation_results": [],
+  "current_node": "d4e5f6a7-4444-4444-8444-000000000040",
+  "plugin_ids": null,
+  "conversation_id": "8b1f0c9e-2d47-4a6b-9c31-5e7d2a1f0b64",
+  "conversation_template_id": null,
+  "gizmo_id": null,
+  "gizmo_type": null,
+  "is_archived": false,
+  "is_starred": null,
+  "safe_urls": [],
+  "blocked_urls": [],
+  "default_model_slug": "gpt-5-5-pro",
+  "conversation_origin": null,
+  "voice": null,
+  "async_status": null,
+  "disabled_tool_ids": [],
+  "is_do_not_remember": false,
+  "memory_scope": "global_enabled",
+  "sugar_item_id": null,
+  "is_study_mode": false,
+  "owner": null
+}

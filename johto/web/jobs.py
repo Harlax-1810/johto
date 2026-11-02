@@ -30,7 +30,7 @@ from datetime import datetime
 
 from .. import actions, studio
 
-POOLS = {"studio": 4, "ai": 1, "github": 2, "local": 3, "lane": 1}
+POOLS = {"studio": 4, "ai": 1, "github": 2, "local": 3, "lane": 1, "research": 1}   # research: task understanding
 KEEP = 300                      # finished jobs kept in memory
 HOLD_MAX_S = 600
 RETRY_S = 30

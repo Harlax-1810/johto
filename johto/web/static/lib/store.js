@@ -143,6 +143,9 @@ const STEP_WORDS = {
   repo: "Reading the repo", saving_repo: "Saving the repo", making_folder: "Making the task folder",
   marking_lead: "Updating the lead", waiting: "Waiting", opening_form: "Opening the form", collecting: "Collecting",
   packing: "Building the review pack", setup: "Setting up", get: "Reading Studio",
+  rating: "Rating slot options", researching: "Researching the repo", brief: "Writing the brief",
+  cloning: "Copying the repo", upstream: "Reading upstream threads", writing: "Writing it up",
+  planning: "Reading the review", checking: "Checking your fields",
 };
 export function stepWord(step) {
   if (!step) return "";

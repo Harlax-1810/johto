@@ -51,6 +51,7 @@ class Base(unittest.IsolatedAsyncioTestCase):
         def no_real_setup(d, kind, log):
             raise AssertionError("a test reached the real lane setup")
         self.svc.setup = no_real_setup
+        self.svc.gate = lambda d, kind: None     # the prompt checks have their own tests (test_gates)
 
     async def asyncTearDown(self):
         for p in self.patches:
@@ -103,6 +104,24 @@ class StartTests(Base):
         self.assertEqual(st["state"], "setup_failed")
         self.assertIn("prework setup failed", st["evidence"])
         self.assertEqual((st["run"]["short"], st["run"]["run"]), ("zz10", "calib-1"))
+
+    async def test_prompt_checks_refuse_before_any_setup(self):
+        from johto import actions
+        task(self.tmp, "zz15")
+        seen = []
+
+        def gate(d, kind):
+            seen.append(kind)
+            if kind == "validate":
+                raise actions.ActionError("same_prompt", "validate-1 already ran this prompt.", {"run": "validate-1"})
+        self.svc.gate = gate
+        self.svc.setup = lambda *a: self.fail("setup ran after a refusal")
+        with self.assertRaises(service.LaneError) as e:
+            await self.svc.start_lane("zz15", "validate")
+        self.assertEqual((e.exception.status, e.exception.code), (409, "same_prompt"))
+        self.assertEqual(e.exception.details, {"run": "validate-1"})
+        self.assertFalse((self.tmp / "tasks" / "zz15" / "runs" / "validate-1").exists())
+        self.assertEqual(seen, ["validate"])
 
     async def test_refuses_a_foreign_lane(self):
         task(self.tmp, "zz11")

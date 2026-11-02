@@ -114,8 +114,17 @@ def _label(d: Path) -> str:
         return d.name
     if meta.get("label"):
         return meta["label"]
+    try:   # the same name the rail and the task page use (lead title, matched seed), never "Task t4sk0002"
+        from . import data
+        label = data._label(meta, data._lead_by_id(meta.get("lead_id")), d)
+        head, _, problem = label.partition(" · ")
+        if problem and not re.fullmatch(r"Task [a-z0-9]{6,}", problem, re.I):
+            return label
+    except Exception:  # noqa: BLE001
+        pass
     repo = (meta.get("repo") or {}).get("full_name", "").split("/")[-1]
-    return f"{repo} · {meta['task_name']}" if repo else meta.get("task_name", d.name)
+    action = ((meta.get("slot") or {}).get("action") or "").split("/")[0].strip()
+    return f"{repo} · {action} task" if repo and action else repo or "the task"
 
 
 def _summary(d: Path) -> dict | None:
@@ -199,14 +208,15 @@ def _qc_wait_job(short: str, audit_id: str, spec: str, parent: str | None) -> di
         if res["status"] == "running":
             actions.fail_qc(d, audit_id, "No result after 15 minutes. Rerun it.")
         c = res["counts"]
+        what = "Mercor's automatic checks" if spec == "AutoQC" else f"Mercor's {spec[:1].lower() + spec[1:]}"
         if res["status"] == "completed":
-            jobs.toast(f"{spec} finished for {_label(d)}: {c['pass']} pass · {c['fail']} fail",
-                       level="warn" if c["fail"] else "ok")
+            if c["fail"]:   # a passing check stays silent; only what needs him toasts
+                n = c["fail"]
+                jobs.toast(f"{what} found {'a problem' if n == 1 else f'{n} problems'} in {_label(d)}.", level="warn")
         elif res["status"] == "running":
-            jobs.toast(f"{spec} for {_label(d)} is still running after 15 min. Rerun the check later.", level="warn")
+            jobs.toast(f"{what} for {_label(d)} are still running after 15 minutes. Run them again later.", level="warn")
         else:
-            jobs.toast(f"{spec} for {_label(d)} ended {res['status']}: {res.get('failure_reason') or ''}".strip(),
-                       level="error")
+            jobs.toast(f"{what} for {_label(d)} stopped. {res.get('failure_reason') or ''}".strip(), level="error")
         task_changed(short, ["qc"])
         return {"audit_id": audit_id, "spec": spec, **res}
 
@@ -230,12 +240,41 @@ def _teardown_after(d: Path, ctx: jobs.JobCtx, run: str | None = None) -> dict:
 
 @guarded
 async def claim(req: Request):
+    """Claim one open slot in Studio (his press). Optional `origin` (spec 7.2): {"kind": "seed", "opportunity_id"}
+    or {"kind": "place", "place_id", "name"}, stored in task.json with the dossier id and naming the task's label.
+    A claim from a dossier may name the slot group he chose (`slot`: action, domain, codebase type)."""
     b = await _body(req)
     lead = actions.load_lead(b["lead_id"]) if b.get("lead_id") else None
+    origin = b.get("origin") if isinstance(b.get("origin"), dict) else None
+    if origin is not None and not b.get("dossier_id"):
+        raise ActionError("invalid", "A claim from a seed or a place needs its repo's research.")
+    if origin is not None and origin.get("kind") == "seed":
+        oid = origin.get("opportunity_id") or b.get("opportunity_id")
+        if b.get("opportunity_id") and b["opportunity_id"] != oid:
+            raise ActionError("invalid", "The seed and the problem it names don't match.")
+        b["opportunity_id"] = oid
+        origin = {**origin, "opportunity_id": oid}
+    elif origin is not None and origin.get("kind") == "place" and b.get("opportunity_id"):
+        raise ActionError("invalid", "A claim from a place has no research problem attached.")
     doc = opp = None
     if b.get("dossier_id"):
         doc, opp = await _thread(actions.load_opportunity, b["dossier_id"], b.get("opportunity_id"))
-    fit = (lead or {}).get("slot_fit") or ((opp or {}).get("slot_fit") or [{}])[0] or b.get("slot") or {}
+    stored_origin = None
+    origin_label = None
+    if origin is not None:
+        from .api_discover import claim_label
+        try:
+            origin_label, stored_origin = await _thread(claim_label, doc, origin)
+        except ValueError as e:
+            raise ActionError("invalid", str(e)) from None
+    chosen = b.get("slot") if isinstance(b.get("slot"), dict) else {}
+    chosen = {k: chosen.get(k) for k in ("action", "domain", "codebase_type")}
+    if lead:
+        fit = lead.get("slot_fit") or {}
+    elif doc is not None and all(chosen.values()):
+        fit = chosen    # the slot group he picked in the claim panel (one of the seed's or place's fits)
+    else:
+        fit = ((opp or {}).get("slot_fit") or [{}])[0] or b.get("slot") or {}
     slot = {"action": fit.get("action"), "domain": fit.get("domain"), "codebase_type": fit.get("codebase_type"),
             "prompt_style": b.get("prompt_style"), "interaction_mode": b.get("interaction_mode")}
     task_id = b.get("task_id")
@@ -256,7 +295,9 @@ async def claim(req: Request):
         raise ActionError("invalid", "Claim needs a lead, a dossier or a repo.")
     expect = b.get("expect_status") or "Ready to Claim"
     label = None
-    if not lead and opp:
+    if origin_label:
+        label = origin_label
+    elif not lead and opp:
         label = f"{repo_args[0].split('/')[-1]} · {opp.get('title')}"
     want_check = b.get("codebase_check", True) is not False
 
@@ -267,14 +308,40 @@ async def claim(req: Request):
         for w in warnings:
             ctx.log(w)
         d = actions.claim(task_id, repo, lead, on_step=ctx.step, dossier=doc, opportunity=opp,
-                          expect_status=expect, label=label)
+                          expect_status=expect, label=label, origin=stored_origin)
         short = d.name
         meta = workspace.load(d)
         child = None
         if want_check:
             child = _codebase_check_later(short, ctx.job_id)
-        undo = jobs.register_undo("claim", short, UNDO_CLAIM_S, lambda: _undo_claim(short, child), f"Unclaim {meta['task_name']}")
-        jobs.toast(f"Claimed {meta['task_name']} · {_label(d)}", level="ok", undo=undo)
+        try:   # the task understanding is researched while he reads the brief, ready for the Prompt step
+            from .. import understand
+            understand.ensure(d)
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"The task understanding didn't start: {e}")
+        # A claim from a seed or a place marks the repo's research as started (a place with no problem id). The
+        # undo puts it back when this claim was what started it.
+        marked = False
+        if stored_origin is not None and doc is not None:
+            try:
+                from ..dossier import worker
+                worker.act(doc["id"], stored_origin.get("opportunity_id"), short)
+                marked = True
+            except Exception:   # already started from another seed, or a fixture dossier: nothing to mark
+                marked = False
+
+        def undo_fn():
+            if marked:
+                try:
+                    from ..dossier import worker
+                    worker.restore(doc["id"])
+                except Exception:
+                    pass
+            return _undo_claim(short, child)
+
+        # The task's label, not Studio's "Task <id>" (no ids on a first layer, spec rule 5).
+        undo = jobs.register_undo("claim", short, UNDO_CLAIM_S, undo_fn, "Unclaim")
+        jobs.toast(f"Claimed {_label(d)}.", level="ok", undo=undo)
         task_changed(short, ["studio", "sections"])
         jobs.publish("leads", {"changed": True})
         return {"short": short, "task_id": meta["task_id"], "task_name": meta["task_name"], "warnings": warnings,
@@ -358,7 +425,7 @@ def _drop(d: Path, reason: str, run: str | None) -> tuple[dict, dict]:
         return {"undone": True}
 
     u = jobs.register_undo("drop", short, UNDO_DROP_S, undo,
-                           f"Dropping: unclaims {meta['task_name']} in Studio and removes its lanes")
+                           f"Dropping: unclaims {_label(config.TASKS / short)} in Studio and removes its lanes")
     return job, u
 
 
@@ -467,7 +534,7 @@ async def collect(req: Request):
         task_changed(short, ["runs"])
         from .domain.queue import run_word
         jobs.toast(f"Collected {run_word(run)} · {_label(d)}: {s.get('human_turns', '?')} turns · "
-                   f"{s.get('active_minutes', '?')} active min", level="warn" if info["problems"] else "ok")
+                   f"{s.get('active_minutes', '?')} working min", level="warn" if info["problems"] else "ok")
         if want_pack:
             ctx.step("packing")
             from . import api_pack
@@ -624,7 +691,7 @@ async def studio_save(req: Request):
         ctx.step("starting_qc")
         aid = actions.start_qc(d, "AutoQC", checked=True)
         child = _qc_wait_job(short, aid, "AutoQC", ctx.job_id) if aid else None
-        jobs.toast(f"Saved {_label(d)} to Studio; AutoQC is running", level="ok")
+        jobs.toast(f"Saved {_label(d)} to Studio. Mercor's automatic checks are running.", level="ok")
         return {"saved": pushed["saved"], "fields": sorted(pushed["fields"]), "at": pushed["at"],
                 "gists": (gists or {}).get("gists"), "run": vrun, "audit_id": aid, "qc_job": (child or {}).get("id")}
 
@@ -696,14 +763,14 @@ async def studio_unclaim(req: Request):
     d = _dir(short)
     b = await _body(req)
     meta = await _thread(workspace.load, d)
-    _confirmed("unclaim", short, b, f"Press again to unclaim {meta['task_name']} in Studio. The slot goes back to the pool.")
+    _confirmed("unclaim", short, b, f"Press again to unclaim {_label(d)} in Studio. The slot goes back to the pool.")
 
     def fn(ctx: jobs.JobCtx):
         ctx.step("recheck", ["recheck", "unclaiming"])
         ctx.step("unclaiming")
         actions.unclaim(d)
         task_changed(short, ["studio"])
-        jobs.toast(f"Unclaimed {meta['task_name']}", level="ok")
+        jobs.toast(f"Unclaimed {_label(d)}. The slot is back in the pool.", level="ok")
         return {"unclaimed_at": workspace.load(d).get("unclaimed_at")}
 
     return _accepted(jobs.submit("unclaim", f"t:{short}", fn, pool="studio", priority=0, cancellable=False,
@@ -742,6 +809,11 @@ def _refresh(short: str, priority: int = 1) -> dict:
             jobs.toast(f"{', '.join(new)} changed both here and in Studio, so neither copy was touched. "
                        f"Make them match in {_label(d)}.", level="warn")
         _review_news(d, was, (workspace.load(d).get("studio") or {}))
+        try:   # a sent-back task: its checklist (a new review) or a check (his fields changed)
+            from . import api_feedback
+            api_feedback.ensure(d)
+        except Exception as e:  # noqa: BLE001
+            print(f"feedback: {e}", flush=True)
         return {k: v for k, v in res.items()}
 
     return jobs.submit("studio_refresh", f"t:{short}", fn, pool="studio", priority=priority, steps=["get"])
@@ -916,8 +988,8 @@ async def repos_vet(req: Request):
 @guarded
 async def scout(req: Request):
     """POST /api/scout {combo, repos, agent, confirm?}: discover and vet repos for a slot combo, mine their
-    issues, and (agent) run the paid headless lead scout on the best few. Past the daily cap it answers 402
-    budget until resent with confirm: true. Leads are research: facts, files, mechanisms; never field text."""
+    issues, and (agent) run the headless lead scout on the best few. No spend cap: Austin is on a Claude
+    subscription. Leads are research: facts, files, mechanisms; never field text."""
     b = await _body(req)
     combo = b.get("combo") or {}
     slot = {k: combo.get(k) for k in ("action", "domain", "codebase_type")}
@@ -927,14 +999,7 @@ async def scout(req: Request):
     agent = b.get("agent", True) is not False
     if jobs.active(kind="scout"):
         return _accepted(jobs.active(kind="scout")[0], existing=True)
-    from . import data
-    st = data.settings()
-    cap = float(st.get("daily_ai_cap_usd", 10))
     est = round(n * SCOUT_USD_PER_REPO, 2) if agent else 0.0
-    left = round(cap - spend_today(), 2)
-    if agent and est > left and b.get("confirm") is not True:
-        raise ActionError("budget", f"This scout costs about ${est:.2f}; ${max(0, left):.2f} is left of today's ${cap:.0f} cap. "
-                          "Press again to go past it.", {"estimate_usd": est, "remaining_usd": max(0.0, left)})
 
     def fn(ctx: jobs.JobCtx):
         from ..scout import cli as scli, leads
@@ -968,7 +1033,7 @@ async def scout(req: Request):
                     _add_spend(SCOUT_USD_PER_REPO)
                     ctx.add_cost(SCOUT_USD_PER_REPO)
         jobs.publish("leads", {"changed": True})
-        jobs.publish("spend", {"today_usd": spend_today(), "cap_usd": cap, "paused_until": None})
+        jobs.publish("spend", {"today_usd": spend_today(), "paused_until": None})
         return {"repos": [r.get("full_name") for r in picked], "leads": found}
 
     return _accepted(jobs.submit("scout", "combo:" + "|".join(slot.values()), fn, pool="ai", priority=1, estimate_usd=est,
@@ -1094,7 +1159,7 @@ routes = [
     Route("/api/tasks/{short}/runs/{run}/notes/{id}", note_edit, methods=["PUT", "DELETE"]),
     Route("/api/tasks/{short}/overlaps/{overlap_id}/accept", overlap_accept, methods=["POST"]),
     Route("/api/tasks/{short}/checklist", checklist),
-    Route("/api/tasks/{short}/check", check),
+    Route("/api/tasks/{short}/lint", check),   # the old local lint; /check is the draft check (api_task)
     Route("/api/tasks/{short}/studio/save", studio_save, methods=["POST"]),
     Route("/api/tasks/{short}/studio/qc", studio_qc, methods=["POST"]),
     Route("/api/tasks/{short}/studio/submit", studio_submit, methods=["POST"]),

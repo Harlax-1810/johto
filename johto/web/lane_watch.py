@@ -1,5 +1,9 @@
-"""Watches lanes. When Claude exits in a lane, collect the run, build its review pack, tell Austin and open
+"""Watches lanes. When Claude exits in a lane, collect the run, get its review pack, tell Austin and open
 the task page where he writes the fields.
+
+The pack is the next one for the run (delta.next_pack: a full pack the first time, then a follow-up), with an
+outside AI review only when settings "pack_outside_review" is on. When a pack already shows the run as it
+ended (the turn watcher packed that checkpoint), that pack is used and nothing is built.
 
 A run counts as ended when its container is running, its transcript has at least one prompt from Austin, no
 Claude process is left in the container, and the transcript hasn't changed for 20 s. Each transcript version
@@ -20,6 +24,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import secrets
 import threading
 import time
 import traceback
@@ -210,18 +215,54 @@ def _lanes():
         return lanes
 
 
-def _pack(d: Path, run: str, key: str, label: str, summary: str = "") -> None:
-    """Build the review pack and wait for it (no polling), then mark the run done and send the run's one
-    notification."""
-    _set(key, phase="packing", message="Building the review pack")
-    from . import api_pack  # registers the job so the UI shows its progress
-    job = api_pack._start(d.name, run, ai=True)
+def _wait(job: dict) -> None:
     done = job.get("_done")
     while job["state"] == "running" and not _STOP.is_set():
         if done is not None:
             done.wait(0.5)
         else:
             time.sleep(0.5)
+
+
+def _build(d: Path, run: str) -> dict:
+    """delta.next_pack in this thread, shown as a pack job in the UI (api_pack.JOBS). A pack job already
+    running for the run is waited on instead. Returns the job: state done (out) or failed (error)."""
+    from .. import delta
+    from . import api_pack
+    with api_pack._LOCK:
+        live = next((j for j in api_pack.JOBS.values()
+                     if j["short"] == d.name and j["run"] == run and j["state"] == "running"), None)
+        if live is None:
+            job = {"id": secrets.token_hex(4), "short": d.name, "run": run, "ai": None, "state": "running", "log": [],
+                   "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "out": None, "tokens": None, "error": None,
+                   "_done": threading.Event()}
+            api_pack.JOBS[job["id"]] = job
+    if live is not None:
+        _wait(live)
+        return live
+    try:
+        job.update(state="done", out=str(delta.next_pack(d, run, log=job["log"].append)))
+    except BaseException as e:  # SystemExit carries plain-words messages
+        job.update(state="failed", error=str(e) or e.__class__.__name__)
+    finally:
+        job["_done"].set()
+    return job
+
+
+def _pack(d: Path, run: str, key: str, label: str, summary: str = "") -> None:
+    """Get the run's review pack: the one that already shows this checkpoint, else the next one (built here).
+    Then mark the run done and send the run's one notification."""
+    from .. import delta
+    rec = None
+    try:
+        rec = delta.checkpoint_packed(d, run)
+    except Exception:
+        traceback.print_exc()
+    if rec:
+        job = {"state": "done", "out": rec["path"]}
+    else:
+        _set(key, phase="packing", message="Building the review pack")
+        job = _build(d, run)
     rw = _run_word(run)
     if job["state"] == "done":
         _mark(d, run, pack=job["out"])
@@ -244,7 +285,7 @@ def _summary_line(s: dict) -> str:
         bits.append(_plural(len(s.get("follow_ups") or []), "follow-up"))
     if s.get("active_minutes") is not None:
         m = s["active_minutes"]
-        bits.append(f"{m} active minute{'' if m == 1 else 's'}")
+        bits.append(f"{m} working minute{'' if m == 1 else 's'}")
     return ", ".join(bits)
 
 

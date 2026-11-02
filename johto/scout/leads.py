@@ -362,7 +362,7 @@ def remove_clone(rec: dict) -> None:
 
 
 def agent_leads(rec: dict, slot: dict, timeout: int = 600, model: str = "opus", effort: str = "high",
-                max_budget_usd: float | None = None, keep_clone: bool = False) -> list[dict]:
+                keep_clone: bool = False) -> list[dict]:
     clone = _clone(rec)
     prompt = AGENT_PROMPT.format(
         commit=rec["commit"], action=slot["action"], action_guide=ACTION_GUIDE.get(slot["action"], ""),
@@ -376,8 +376,6 @@ def agent_leads(rec: dict, slot: dict, timeout: int = 600, model: str = "opus", 
             "--allowedTools", "Read,Grep,Glob,Bash(git log:*),Bash(git show:*),Bash(ls:*),Bash(wc:*)",
             "--disallowedTools", "Edit,Write,NotebookEdit,WebFetch,WebSearch,Task,Agent",
             "--setting-sources", "project", "--strict-mcp-config", "--no-session-persistence"]
-    if max_budget_usd:
-        argv += ["--max-budget-usd", str(max_budget_usd)]
     started = time.time()
     try:
         r = subprocess.run(argv, cwd=str(clone), capture_output=True, text=True, timeout=timeout,

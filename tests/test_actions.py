@@ -18,7 +18,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).parent))
 import test_actions_support as fx  # noqa: E402
 
-from johto import actions, cli, config, lanes, workspace  # noqa: E402
+from johto import actions, cli, config, lanes, lint, workspace  # noqa: E402
 from johto.actions import ActionError  # noqa: E402
 from johto.fakes import gh as fake_gh, lanes as fake_lanes, studio as fake  # noqa: E402
 
@@ -104,6 +104,19 @@ class Checklist(Base):
         self.assertTrue(actions.submit_blockers(rows))
         for r in rows:
             self.assertEqual(set(r) >= {"key", "status", "title", "detail", "blocking", "fix"}, True)
+
+    def test_studio_saved_text_row(self):
+        self.assertNotIn("studio_saved", self.rows())
+        warn = [(lint.WARN, "Validation Notes", 'Studio\'s text looks cut off: it ends "...it fo".')]
+        with mock.patch.object(lint, "check_saved_fields", lambda d: warn):
+            r = self.rows()["studio_saved"]
+        self.assertEqual((r["status"], r["blocking"]), ("warn", False))
+        self.assertEqual(r["fix"]["field"], "validation_notes")
+        cut = [(lint.ERROR, "Goal", "Studio's copy stops mid-word")] + warn
+        with mock.patch.object(lint, "check_saved_fields", lambda d: cut):
+            r = self.rows()["studio_saved"]
+            self.assertTrue(any("Studio's copy stops mid-word" in m for _, _, m in actions.check(self.d)))
+        self.assertEqual((r["status"], r["blocking"], r["fix"]["field"]), ("fail", True, "goal"))
 
     def test_studio_sync_notices_edits_after_save(self):
         self.run_("validate")
@@ -287,12 +300,14 @@ class Cli(Base):
     def test_check_and_submission_run(self):
         self.run_("calib")
         out = self.out("check", self.d.name)
-        self.assertIn("no validation run yet", out)
+        self.assertIn("no validation run yet", out.lower())
         out = self.out("submission-run", self.d.name, "calib-1")
         self.assertIn("submits calib-1", out)
         out = self.out("check", self.d.name)
         self.assertIn("(run calib-1)", out)
-        self.assertNotIn("no validation run yet", out)
+        open_part, _, resolved = out.lower().partition("resolved since the last check")
+        self.assertNotIn("no validation run yet", open_part)
+        self.assertIn("no validation run yet", resolved)
 
     def test_action_errors_exit_with_the_plain_message(self):
         with self.assertRaises(SystemExit) as e:
@@ -302,3 +317,47 @@ class Cli(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StudioTab(unittest.TestCase):
+    """studio._SCRIPT runs inside browser-harness; here its helpers are fakes."""
+
+    def run_script(self, tabs, sessions):
+        import io, contextlib
+        from johto import studio
+        used, opened = [], []
+
+        def js(expr, target_id=None):
+            used.append(target_id)
+            if "Clerk.session)" in expr and "getToken" not in expr:
+                return sessions.get(target_id, False)
+            return json.dumps({"status": 200, "body": "{}", "version": None})
+
+        script = studio._SCRIPT % {"req": json.dumps({"method": "GET", "url": "u", "body": None, "campaign": "c",
+                                                      "company": "co", "account": "a"}),
+                                   "account": "me@x", "start": "https://studio.mercor.com/start", "mark": studio.MARK}
+        ns = {"list_tabs": lambda include_chrome=True: tabs, "js": js,
+              "new_tab": lambda url, account=None: opened.append(url) or "new"}
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), mock.patch("time.sleep", lambda s: None):
+            exec(script, ns)
+        return used[-1], opened, out.getvalue()
+
+    def test_a_signed_in_tab_wins_over_one_left_on_sign_in(self):
+        tabs = [{"targetId": "signin", "url": "https://studio.mercor.com/sign-in/", "account": "me@x"},
+                {"targetId": "tasks", "url": "https://studio.mercor.com/annotator/tasks/", "account": "me@x"}]
+        last, opened, out = self.run_script(tabs, {"tasks": True})
+        self.assertEqual(last, "tasks")
+        self.assertEqual(opened, [])
+        self.assertIn('"status": 200', out)
+
+    def test_signed_out_everywhere_reuses_a_tab_and_says_so(self):
+        tabs = [{"targetId": "signin", "url": "https://studio.mercor.com/sign-in/", "account": "me@x"}]
+        last, opened, out = self.run_script(tabs, {})
+        self.assertEqual((last, opened), ("signin", []))
+        self.assertIn("no Clerk session", out)
+
+    def test_no_studio_tab_opens_one(self):
+        last, opened, _ = self.run_script([], {"new": True})
+        self.assertEqual(opened, ["https://studio.mercor.com/start"])
+        self.assertEqual(last, "new")

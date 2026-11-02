@@ -151,6 +151,9 @@ def new_item(entry: dict, rank: int | None, manual: bool = False) -> dict:
         "queued_at": now_iso(), "started_at": None, "finished_at": None, "closed_at": None,
         "progress": None, "elapsed_s": None, "cost_usd": None, "error": None, "errors": None,
         "decline": None, "actioned": None, "manual": manual,
+        # Slot groups ("Action|Domain|Codebase type") this research was started for: the prompt asks for
+        # opportunities that fit them, and the brief picks seeds for them.
+        "focus": list(entry.get("focus") or []),
     }
 
 

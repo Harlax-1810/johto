@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState } from "preact/hooks";
 import { signal } from "@preact/signals";
 import { html } from "../lib/html.js";
-import { drawer, lane, closeDrawer, tick, tasks, loadTask, patchTask, toast, jobs, jobFor, isLive, afterRunLine, serverNavigate, ENDING_TOAST } from "../lib/store.js";
+import { app, drawer, lane, closeDrawer, tick, tasks, loadTask, patchTask, toast, jobs, jobFor, isLive, afterRunLine, serverNavigate, ENDING_TOAST } from "../lib/store.js";
 import { isGlobalChord, saveFocus, restoreFocus } from "../lib/keys.js";
 import { api } from "../lib/api.js";
 import { act } from "../lib/actions.js";
 import { clock, mins } from "../lib/format.js";
 import { Chip, Kbd } from "./ui.js";
 import { PackButton } from "./pack.js";
+import { MonitorLine, stateWord, turnOf } from "./monitor.js";
 
 let xtermMod = null;
 async function loadXterm() {
@@ -101,7 +102,7 @@ export function Terminal({ path = "/ws/lane", active, idleText }) {
           } else if (msg.type === "navigate") {
             if (path === "/ws/lane") serverNavigate(msg.href, msg.reason);
           } else if (msg.type === "exit") {
-            term.write(`\r\n\x1b[2m[the lane session ended${msg.code ? `, code ${msg.code}` : ""}]\x1b[0m\r\n`);
+            term.write(`\r\n\x1b[2m[the lane session ended]\x1b[0m\r\n`);
             if (path === "/ws/lane") ptyInfo.value = { ...ptyInfo.value, exited: msg.code ?? 0 };
           }
         };
@@ -139,12 +140,30 @@ const STATE_CHIP = {
   collecting: ["neutral", "Collecting"], collected: ["neutral", "Collected"],
 };
 const kindWord = (k) => (k === "calib" ? "calibration" : "validation");
-const runLabel = (run) => (run ? `${kindWord(run.kind)} ${(run.run || "").split("-")[1] || ""}`.trim() : "");
+/** "validation run", "validation run 2": a run's words, never its id. */
+const runLabel = (run) => {
+  if (!run) return "";
+  const n = (run.run || "").split("-")[1];
+  return `${kindWord(run.kind)} run${n && n !== "1" ? ` ${n}` : ""}`;
+};
 const mmss = (s) => `${Math.floor((s || 0) / 60)}:${String((s || 0) % 60).padStart(2, "0")}`;
+
+/** "Changed 3 files · Ran the tests: all passed". A result the pipe hid (last_ok null) says nothing, never failed. */
+function footFacts(f) {
+  const n = f.files_edited?.length || 0;
+  const out = [n ? `Changed ${n} file${n === 1 ? "" : "s"}` : "No edits yet"];
+  const t = f.tests || {};
+  if (t.runs && t.last_ok === true) out.push("Ran the tests: all passed");
+  else if (t.runs && t.last_ok === false) out.push("Ran the tests: failing");
+  return out.join(" · ");
+}
 
 // The drawer's state action, run by ⌘⇧↵ while focus is in the drawer (the terminal included).
 let drawerPrimary = null;
 export function runDrawerPrimary() { if (drawerPrimary) { drawerPrimary(); return true; } return false; }
+
+/** The next run the free lane can start. A calibration run only when settings.calibrate_first is on. */
+const nextRun = (l) => (l.queue || []).find((q) => q.kind !== "calib" || app.value?.settings?.calibrate_first) || null;
 
 /** Lane actions that type into the lane or start it. Each says plainly what it types. */
 function laneActions(l, ptyLocked, collecting) {
@@ -160,9 +179,9 @@ function laneActions(l, ptyLocked, collecting) {
   if (s === "needs_login") out.main = { label: "Type /login", run: typing("login", "Typed /login. Finish signing in in the browser tab it opens."), title: "Types /login and Enter in the lane" };
   // Once text sits in Claude's input box, a paste or /exit would land on top of it (the server refuses both).
   else if (s === "ready_for_prompt" && l.input?.empty !== false) out.main = { label: "Paste my prompt", run: typing("prompt", "Pasted your saved Opening Prompt. Press Enter in the lane to send it."), title: "Pastes your saved Opening Prompt without pressing Enter" };
-  else if (s === "free" && l.queue?.length) {
-    const q = l.queue[0];
-    out.main = { label: `Start ${kindWord(q.kind)}`, run: () => act("/api/lane/start", { short: q.short, kind: q.kind }, { what: `Setting up ${kindWord(q.kind)}` }),
+  else if (s === "free" && nextRun(l)) {
+    const q = nextRun(l);
+    out.main = { label: `Start the ${kindWord(q.kind)} run`, run: () => act("/api/lane/start", { short: q.short, kind: q.kind }, { what: `Setting up the ${kindWord(q.kind)} run` }),
       title: `Sets up a new lane for ${q.label}` };
   } else if (s === "setup_failed" && run) {
     out.main = { label: "Retry in a new folder", run: () => act("/api/lane/start", { short: run.short, kind: run.kind }, { what: "Setting up again" }),
@@ -191,9 +210,12 @@ function SetupLog({ l }) {
   const lines = (j?.error?.details?.errors || j?.progress?.log_tail || []).filter((x) => /ERROR|error|failed/i.test(x));
   const tail = lines.length ? lines : (j?.progress?.log_tail || []).slice(-6);
   return html`<div class="term-msg">
-    <div class="tm-h">Lane setup failed${j?.error?.message ? `: ${j.error.message}` : ""}</div>
-    ${tail.length ? html`<pre>${tail.join("\n")}</pre>` : null}
-    ${l.evidence ? html`<pre>${l.evidence}</pre>` : null}
+    <div class="tm-h">The lane couldn't be set up. A fresh folder usually fixes it.</div>
+    ${tail.length || l.evidence || j?.error?.message ? html`<details class="nv-details"><summary>Details</summary>
+      ${j?.error?.message ? html`<p>${j.error.message}</p>` : null}
+      ${tail.length ? html`<pre>${tail.join("\n")}</pre>` : null}
+      ${l.evidence ? html`<pre>${l.evidence}</pre>` : null}
+    </details>` : null}
   </div>`;
 }
 
@@ -233,8 +255,16 @@ export function LaneDrawer() {
     return () => clearTimeout(closeTimer.current);
   }, [l.state]);
 
-  const [tone, label] = l.state === "ready_for_prompt" && l.input?.empty === false ? ["amber", "Press Enter to send"]
+  let [tone, label] = l.state === "ready_for_prompt" && l.input?.empty === false ? ["amber", "Press Enter to send"]
     : STATE_CHIP[l.state] || ["neutral", l.state];
+  // The run monitor (runmon) for this run: measured minutes, background work, the wait, the review.
+  const mon = l.monitor && run && l.monitor.run === run.run ? l.monitor : null;
+  if (l.state === "waiting" && mon?.turn_class) {
+    // An ended turn alone isn't a question: say what the turn was.
+    const c = turnOf(mon);
+    label = stateWord(mon).replace(/^Claude /, "").replace(/^./, (x) => x.toUpperCase());
+    tone = c === "question" || c === "permission" ? "amber" : c === "problem" ? "red" : "neutral";
+  }
   const f = l.facts;
   const budget = f?.task_claude_min ?? 0;
   const budgetTone = budget >= 90 ? "red" : budget >= 60 ? "amber" : "";
@@ -251,7 +281,7 @@ export function LaneDrawer() {
   drawerPrimary = acts.main?.run || null;
   const locked = l.input_locked || pty.locked;
   const flash = Date.now() - pty.swallowedAt < 1500;
-  const queued = l.state === "free" ? (l.queue || [])[0] : null;
+  const queued = l.state === "free" ? nextRun(l) : null;
 
   async function addNote() {
     const text = note.trim();
@@ -280,7 +310,7 @@ export function LaneDrawer() {
     <div class="dhead">
       <div class="r1">
         <span class="label">Lane</span>
-        <span class="dtitle">${run ? `${run.label} · ${runLabel(run)}` : queued ? `Next: ${queued.label} · ${kindWord(queued.kind)}` : "No run"}</span>
+        <span class="dtitle">${run ? `${run.label} · ${runLabel(run)}` : queued ? `Next: ${queued.label} · ${kindWord(queued.kind)} run` : "No run"}</span>
         <span style="flex:1"></span>
         <div class="tabs">
           <button class=${`tab ${tab === "claude" ? "on" : ""}`} onClick=${() => pickTab("claude")}>Claude</button>
@@ -291,11 +321,12 @@ export function LaneDrawer() {
       <div class="r2">
         <${Chip} tone=${tone}>${label}${["waiting", "working", "permission"].includes(l.state) ? html` <span class="num">${clock(l.since)}</span>` : null}<//>
         ${l.rate_limited ? html`<${Chip} tone="red">Rate limited${l.rate_limited.until ? ` · resets ${l.rate_limited.until}` : ""}<//>` : null}
-        ${f ? html`<span>${f.model_ok === false || f.effort_ok === false ? html`<span class="chip red">model or effort wrong</span>` : f.model_ok ? "Opus 5.5 · high ✓" : ""}</span>
-          <span class=${budgetTone ? `chip ${budgetTone}` : ""}>Claude on task <b class="num">${mins(budget)}</b> of 90 min</span>
+        ${f ? html`${f.model_ok === false || f.effort_ok === false ? html`<span class="chip red">Claude ran on the wrong model</span>` : null}
+          ${mon ? null : html`<span class=${budgetTone ? `chip ${budgetTone}` : ""}>Claude <b class="num">${mins(budget)}</b> of 90 min</span>`}
           ${f.follow_ups ? html`<span><b class="num">${f.follow_ups}</b> follow-up${f.follow_ups === 1 ? "" : "s"}</span>` : null}` : null}
-        ${locked ? html`<span class=${`chip neutral ${flash ? "flash" : ""}`} title="Enter is held back after the opening prompt on async slots. ⌘K: Unlock lane input">Input locked (async)</span>` : null}
-        ${busy ? html`<span class="djob" title=${(busy.progress?.log_tail || []).slice(-6).join("\n")}><span class="dot busy"></span>${afterRunLine(busy)} <span class="num">${clock(busy.started_at || busy.created_at)}</span></span>` : null}
+        ${mon ? html`<${MonitorLine} m=${mon} />` : null}
+        ${locked ? html`<span class=${`chip neutral ${flash ? "flash" : ""}`} title="After the opening prompt on a one-message task, Enter is held back so nothing else is sent. ⌘K: Unlock lane input">Input locked</span>` : null}
+        ${busy ? html`<span class="djob"><span class="dot busy"></span>${afterRunLine(busy)} <span class="num">${clock(busy.started_at || busy.created_at)}</span></span>` : null}
         <span style="flex:1"></span>
         ${acts.main ? html`<button class="btn sm primary" onClick=${acts.main.run} title=${acts.main.title}><${Kbd} k="⌘⇧↵" />${acts.main.label}</button>` : null}
       </div>
@@ -306,7 +337,7 @@ export function LaneDrawer() {
         idleText=${run && busy ? `${afterRunLine(busy)}…` : run && autoCollecting ? `Collecting ${runLabel(run)}…` : null} /></div>
       ${shellOn ? html`<div class="dterm" style=${tab === "shell" ? "" : "display:none"}><${Terminal} path="/ws/shell" active=${d.open && tab === "shell"} /></div>` : null}
     </div>
-    <div class="notes">
+    ${run ? html`<div class="notes">
       <div style="display:flex;align-items:center;justify-content:space-between">
         <span class="label">Run notes</span><span class="kbd">⌥N</span>
       </div>
@@ -314,9 +345,9 @@ export function LaneDrawer() {
       <input value=${note} aria-label="Add a run note" spellcheck=${true} autocomplete="off" disabled=${!run}
         onInput=${(e) => setNote(e.currentTarget.value)}
         onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); addNote(); } }} />
-    </div>
+    </div>` : null}
     <div class="dfoot">
-      <span>${f ? `${f.files_edited?.length || 0} files edited · tests ${f.tests?.runs || 0} run${f.tests?.runs === 1 ? "" : "s"}${f.tests?.runs && f.tests.last_ok != null ? `, last ${f.tests.last_ok ? "passed" : "failed"}` : ""}` : ""}</span>
+      <span>${f ? footFacts(f) : ""}</span>
       <span style="display:flex;gap:8px">
         ${run && !["preparing", "needs_login", "ready_for_prompt"].includes(l.state) ? html`<${PackButton} short=${run.short} run=${run.run} />` : null}
         <button class="btn sm quiet" title="Full width (⌃⇧\`)" onClick=${() => (drawer.value = { ...d, full: !d.full })}>${d.full ? "Narrow" : "Full width"}</button>

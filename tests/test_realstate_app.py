@@ -54,10 +54,29 @@ class RealApi(RealRoot):
         self.assertEqual(st, 200)
         self.assertEqual(s["server"]["mode"], "real")
         self.assertEqual(s["lane"]["state"], "waiting")
-        self.assertEqual(s["queue"][0]["kind"], "lane_waiting")
+        self.assertEqual(s["queue"][0]["kind"], "submit")
         self.assertEqual({t["short"]: t["stage"] for t in s["tasks"]}, self.expected)
+        # Every row says what the machine is doing; every task says which run the submission uses.
+        live = next(i for i in s["queue"] if i["short"] == "llive001")
+        self.assertEqual((live["kind"], live["attention"]), ("lane_answer", False))
+        self.assertTrue(live["machine"]["text"])
+        for t in s["tasks"]:
+            self.assertIn("submission_run", t)
+            self.assertIn("monitor", t)
         for k in ("settings", "running", "jobs", "spend", "studio", "slots"):
             self.assertIn(k, s)
+
+    def test_lane_monitor_route(self):
+        st, out = call("GET", "/api/lane/monitor", query="short=llive001")
+        self.assertEqual(st, 200)
+        m = out["monitor"]
+        self.assertEqual((out["run"], m["run"], m["host"]), (m["run"], out["run"], "Mac"))
+        for k in ("working_minutes", "task_minutes", "budget", "background", "review", "turn_class", "command"):
+            self.assertIn(k, m)
+        self.assertEqual(call("GET", "/api/lane/monitor", query="short=nosuch99")[0], 404)
+        self.assertEqual(call("GET", "/api/lane/monitor", query="short=llive001&run=validate-9")[0], 404)
+        self.assertEqual(call("GET", "/api/lane/monitor", query="short=../x")[0], 400)
+        self.assertEqual(call("GET", "/api/lane/monitor", query="short=llive001", cookie=False)[0], 401)
 
     def test_auth_and_origin(self):
         self.assertEqual(call("GET", "/api/state", cookie=False)[0], 401)
@@ -149,7 +168,7 @@ class RealApi(RealRoot):
         st, out = call("POST", "/api/tasks/aprompt1/done", {"surface": "prompt"}, headers=SAME)
         self.assertEqual((st, out["error"]["code"]), (422, "missing_fields"))
         call("PUT", "/api/tasks/aprompt1/sections/opening_prompt",
-             {"text": "Sometimes the retries leave failed scrobbles behind and it takes me a few runs to clear them all out."},
+             {"text": "Some exports stop early and leave half a file behind, and I have to kick them off again by hand."},
              headers=SAME)
         # By default there's no calibration: the goal comes next.
         st, out = call("POST", "/api/tasks/aprompt1/done", {"surface": "prompt"}, headers=SAME)
@@ -184,6 +203,20 @@ class RealApi(RealRoot):
         self.assertEqual(st, 200, out)
         self.assertEqual(out["summary"]["stage"], "ready_to_save")
 
+    def test_details_before_the_validation_run_need_no_fields(self):
+        """Austin's order: only the prompt before the validation run. Details Done then starts it, fields empty."""
+        call("PUT", "/api/tasks/aprompt1/sections/opening_prompt",
+             {"text": "Some exports stop early and leave half a file behind, and I have to kick them off again by hand."},
+             headers=SAME)
+        self.assertEqual(call("POST", "/api/tasks/aprompt1/done", {"surface": "prompt"}, headers=SAME)[0], 200)
+        st, out = call("POST", "/api/tasks/aprompt1/done", {"surface": "details"}, headers=SAME)
+        self.assertEqual(st, 200, out)
+        self.assertEqual(self.meta("aprompt1")["ready"]["kind"], "validate")
+        # Once a validation run exists the details describe it, so an empty field is refused again.
+        self.assertEqual(call("PUT", "/api/tasks/drate001/sections/goal", {"text": ""}, headers=SAME)[0], 200)
+        st, out = call("POST", "/api/tasks/drate001/done", {"surface": "details"}, headers=SAME)
+        self.assertEqual((st, out["error"]["code"], out["error"]["details"]["fields"]), (422, "missing_fields", ["goal"]))
+
     def test_ratings_put(self):
         st, out = call("PUT", "/api/tasks/drate001/ratings", {"one_shot": "No", "task_success": 3, "steering": 2}, headers=SAME)
         self.assertEqual(st, 200)
@@ -191,8 +224,8 @@ class RealApi(RealRoot):
         self.assertIn("Task Success: 3", (self.root / "tasks" / "drate001" / "submission.md").read_text())
 
     def test_label_hide_presence(self):
-        st, out = call("PUT", "/api/tasks/aprompt1/label", {"label": "scrobbler · retries"}, headers=SAME)
-        self.assertEqual((st, out["summary"]["label"]), (200, "scrobbler · retries"))
+        st, out = call("PUT", "/api/tasks/aprompt1/label", {"label": "uploader · retries"}, headers=SAME)
+        self.assertEqual((st, out["summary"]["label"]), (200, "uploader · retries"))
         st, s = call("GET", "/api/state")
         rid = s["queue"][1]["id"]
         self.assertEqual(call("POST", f"/api/items/{rid}/hide", {}, headers=SAME)[0], 204)

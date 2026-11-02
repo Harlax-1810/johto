@@ -16,8 +16,10 @@ _LOCK = threading.Lock()
 _ACC_LOCK = threading.Lock()
 
 
-# AI text made after (and from) his fields: AutoQC and the outside review quote them, Claude echoes his prompt.
-DOWNSTREAM = {"autoqc", "audit", "transcript_claude"}
+# AI text made after (and from) his fields: AutoQC and the outside reviews quote them, Claude echoes his prompt,
+# and the grading table, writing kit and checks are built from the run. Helper-chat notes (kind "notes") count
+# as research shown before he writes, like brief.md, so they count against every field.
+DOWNSTREAM = {"autoqc", "audit", "transcript_claude", "review", "grading", "kit", "check"}
 _QUOTED = re.compile(r'"[^"\n]{0,600}"|`[^`\n]{0,600}`')
 
 

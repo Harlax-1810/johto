@@ -411,3 +411,25 @@ class CloneTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FocusTest(unittest.TestCase):
+    """Research started for particular open slots asks for opportunities that fit them."""
+
+    def test_no_focus_no_section(self):
+        self.assertIsNone(generate.focus_section({"focus": []}))
+        self.assertNotIn("Open slots this research is for", generate.build_prompt(
+            {"full_name": "o/r", "commit": "a" * 40}, {}, "o__r__aaaaaaaa"))
+
+    def test_focus_lists_each_slot_with_how_it_is_written(self):
+        entry = {"full_name": "o/r", "commit": "a" * 40,
+                 "focus": ["Understand / Assess|Other software|Enterprise-grade|Casual prose|Async/autonomous",
+                           "Operate|Games|Personal-scale", "bad"]}
+        s = generate.build_prompt(entry, {}, "o__r__aaaaaaaa")
+        self.assertIn("## Open slots this research is for", s)
+        self.assertIn("- Understand / Assess | Other software | Enterprise-grade (written as a short casual message", s)
+        self.assertIn("Claude works alone until it is done", s)
+        self.assertIn("- Operate | Games | Personal-scale\n", s + "\n")
+        self.assertNotIn("bad", generate.focus_section(entry))
+        # The section sits before the output rules, so the output rules stay last.
+        self.assertLess(s.index("Open slots this research is for"), s.index("## Output"))

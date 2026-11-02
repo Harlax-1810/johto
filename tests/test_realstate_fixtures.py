@@ -83,7 +83,7 @@ def transcript(turns: int = 1, minutes: float = 6.0, tests_ok: bool | None = Tru
         eid = f"toolu_edit_{k}"
         out.append({"type": "assistant", "isSidechain": False, "timestamp": at(t0 + step * 0.3),
                     "message": {"model": model, "stop_reason": "tool_use", "content": [
-                        {"type": "text", "text": "Reading the scrobble queue."},
+                        {"type": "text", "text": "Reading the upload queue."},
                         {"type": "tool_use", "id": eid, "name": "Edit",
                          "input": {"file_path": f"/exp/PREWORK_x/model_a/src/backend/file{t}.ts"}}]}})
         out.append({"type": "user", "isSidechain": False, "timestamp": at(t0 + step * 0.35),

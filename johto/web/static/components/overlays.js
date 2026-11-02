@@ -30,7 +30,7 @@ export function Palette() {
   const run = (i) => { if (i?.enabled === false) return; close(); i?.run?.(); };
   return html`<div class="scrim" onClick=${close}></div>
   <div class="palette" role="dialog" aria-label="Commands">
-    <input ref=${input} value=${q} aria-label="Search commands" autocomplete="off" spellcheck=${false}
+    <input ref=${input} value=${q} aria-label="Search commands" placeholder="Type to find a command or a task" autocomplete="off" spellcheck=${false}
       onInput=${(e) => { setQ(e.currentTarget.value); setAt(0); }}
       onKeyDown=${(e) => {
         if (e.key === "Escape") { e.preventDefault(); close(); }
@@ -47,18 +47,18 @@ export function Palette() {
 }
 
 const KEYS = [
-  ["Everywhere", [["⌘↵", "Do the Next row"], ["⌘⇧↵", "Primary action of this screen"], ["⌃`", "Open or close the lane"],
+  ["Everywhere", [["⌘↵", "Do what Now shows first"], ["⌘⇧↵", "Primary action of this screen"], ["⌃`", "Open or close the lane"],
                   ["⌃⇧`", "Lane full width"], ["⌘K", "Commands"], ["⌥N", "Add a run note"]]],
-  ["Lists", [["j / k", "Move in the queue"], ["↵", "Open"], ["x", "Hide until it changes"], ["t", "Task page"],
-             ["o", "Open in Studio"], ["/", "Search the code"], ["g h · g p · g s · g f", "Home, Repos, Scout, Finished"],
+  ["Lists", [["j / k", "Move through what's next"], ["↵", "Open"], ["x", "Hide until it changes"], ["t", "Task page"],
+             ["o", "Open in Studio"], ["/", "Search the code"], ["g h · g p · g s · g f", "Now, Find work, Slot map, Submitted"],
              ["⌘Z", "Undo a claim or drop"], ["?", "This list"]]],
   ["Writing", [["⌥1 – ⌥5", "Jump between fields"], ["⌥R", "Show or hide the reference pane"], ["Esc", "Leave the field"]]],
   ["Pick", [["c", "Claim"], ["← / →", "Slot variant"], ["r", "Check difficulty"], ["s", "Scout more"]]],
   ["Lane", [["⌘⇧↵", "In the lane: type /login, paste my prompt, or end an async run"], ["⇧E ⇧E", "End the run and collect it (press twice)"],
             ["Esc", "Goes to Claude"]]],
-  ["Keep or drop", [["⌘⇧↵", "Keep"], ["s", "Use this run for Studio (no validation run)"], ["e", "Edit prompt"], ["d", "Drop (10 s undo)"], ["a", "Run audit"]]],
+  ["Keep or drop (with calibration on)", [["⌘⇧↵", "Keep"], ["e", "Edit prompt"], ["d", "Drop (10 s undo)"]]],
   ["Rate", [["y / n", "One-shot"], ["1 – 5", "Task Success, then Steering"], ["⌫", "Step back"]]],
-  ["Studio", [["q", "Rerun AutoQC"]]],
+  ["Studio", [["q", "Run the automatic checks again"]]],
 ];
 
 export function KeyOverlay() {

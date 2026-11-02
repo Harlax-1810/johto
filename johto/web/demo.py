@@ -1,6 +1,6 @@
 """A hypothetical afternoon with six tasks in flight, for designing and reviewing the UI.
 
-Leads, repos, slots, files and code are real. Protected fields (the ones only Austin writes)
+Leads, repos, slots, files and code are invented. Protected fields (the ones only Austin writes)
 hold lorem ipsum so nothing here can be mistaken for, or copied into, real submission text.
 """
 from __future__ import annotations
@@ -53,45 +53,45 @@ def _demo_lead(lid, repo, commit, lang, action, domain, title, files, mechanism,
 
 # Invented repos and leads: the demo never reads data/scout/.
 DEMO_LEADS = {x["id"]: x for x in (
-    _demo_lead("L9c0f9f1", "acme/chatd", "5ad0c0de11b2c3d4e5f60718293a4b5c6d7e8f90", "Go", "Create", "Backend / API",
+    _demo_lead("Ldemo001", "acme/chatd", "5ad0c0de11b2c3d4e5f60718293a4b5c6d7e8f90", "Go", "Create", "Backend / API",
                "Lock and unlock a room from the admin API", ["room/room.go", "server/api.go"],
                "Rooms have no locked state; joins are only checked against the room's password.",
                "Lock a room, then try to join it as a new user and as an operator.", "medium",
                "The API shape is open, so the model has to choose between several reasonable designs."),
-    _demo_lead("L90ea168", "acme/chatd", "5ad0c0de11b2c3d4e5f60718293a4b5c6d7e8f90", "Go", "Create", "Backend / API",
+    _demo_lead("Ldemo002", "acme/chatd", "5ad0c0de11b2c3d4e5f60718293a4b5c6d7e8f90", "Go", "Create", "Backend / API",
                "List live clients and kick one", ["room/client.go", "server/api.go"],
                "Clients are tracked per room but never exposed; there is no way to remove one.",
                "Join with two clients, list them, kick one and check it disconnects.", "medium",
                "Kicking touches connection teardown, which is easy to get subtly wrong."),
-    _demo_lead("Le7f30b2", "acme/playlog", "9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", "TypeScript", "Modify",
+    _demo_lead("Ldemo003", "acme/playlog", "9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", "TypeScript", "Modify",
                "Web frontend", "Import returns no tracks for some accounts", ["src/sources/import.ts"],
                "The importer stops at the first empty page instead of following the next cursor.",
                "Import an account whose second page is empty and check later pages arrive.", "low",
                "The bug is in one function, but the fix needs a fixture the repo doesn't have."),
-    _demo_lead("Lec84e04", "acme/photobox", "1b2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d", "JavaScript", "Modify",
+    _demo_lead("Ldemo004", "acme/photobox", "1b2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d", "JavaScript", "Modify",
                "Web frontend", "Tag saves fail silently", ["src/tags/save.js", "src/api/tags.js"],
                "A failed save is caught and dropped, so the UI shows the tag as saved.",
                "Make the API return 500 and check the UI shows the error and keeps the old tag.", "medium",
                "Error states cross the UI and API layers."),
-    _demo_lead("L8384046", "acme/photobox", "1b2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d", "JavaScript", "Modify",
+    _demo_lead("Ldemo005", "acme/photobox", "1b2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d", "JavaScript", "Modify",
                "Web frontend", "Overlapping syncs duplicate photos", ["src/sync/index.js"],
                "Two syncs can start at once; each inserts the same new files.",
                "Start two syncs together and count the photos afterwards.", "medium",
                "Needs a lock or queue; the model must pick where it lives."),
-    _demo_lead("L7744e24", "acme/flowrun", "2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d5e", "Go", "Create", "Backend / API",
+    _demo_lead("Ldemo006", "acme/flowrun", "2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d5e", "Go", "Create", "Backend / API",
                "SQLite as a storage backend", ["store/store.go", "store/postgres.go"],
                "Storage is Postgres-only, behind an interface that leaks Postgres types.",
                "Run the store test suite against SQLite.", "low",
                "Large change across the storage layer; one-shot is unlikely."),
-    _demo_lead("Leb5869e", "acme/flowrun", "2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d5e", "Go", "Create", "Backend / API",
+    _demo_lead("Ldemo007", "acme/flowrun", "2c3d4e5f60718293a4b5c6d7e8f9001a2b3c4d5e", "Go", "Create", "Backend / API",
                "foreach in step templates", ["engine/template.go"],
                "Templates support only plain substitution, so lists must be expanded by hand.",
                "Render a step that loops over a list input.", "medium",
                "Template parsing is easy; scoping loop variables is where it goes wrong."),
-    _demo_lead("L5aed681", "acme/playlog", "9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", "TypeScript", "Modify",
+    _demo_lead("Ldemo008", "acme/playlog", "9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", "TypeScript", "Modify",
                "Web frontend", "Desktop presence shows the wrong track", ["src/clients/presence.ts"],
-               "Presence updates use the previous track when two plays arrive close together.",
-               "Send two plays a second apart and check the presence shows the second.", "medium",
+               "Presence updates use the previous track when two updates arrive close together.",
+               "Send two updates a second apart and check the presence shows the second.", "medium",
                "A race between two async updates."),
 )}
 
@@ -105,21 +105,21 @@ CASUAL = "Casual prose"
 
 TASKS = [
     # short, task_id, lead, slot, stage
-    ("d3m0aab3", "task_demo_d3m0aab3", "L9c0f9f1", ("Create", "Backend / API", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aab3", "task_demo_d3m0aab3", "Ldemo001", ("Create", "Backend / API", "Personal-scale", CASUAL, INTERACTIVE),
      "validating", "chatd · Lock/unlock room"),
-    ("d3m0aaa9", "task_demo_d3m0aaa9", "L90ea168", ("Create", "Backend / API", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aaa9", "task_demo_d3m0aaa9", "Ldemo002", ("Create", "Backend / API", "Personal-scale", CASUAL, INTERACTIVE),
      "prompt", "chatd · Live clients + kick"),
-    ("d3m0aaa1", "task_demo_d3m0aaa1", "Le7f30b2", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aaa1", "task_demo_d3m0aaa1", "Ldemo003", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
      "decide", "playlog · Import returns no tracks"),
-    ("d3m0aab1", "task_demo_d3m0aab1", "Lec84e04", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aab1", "task_demo_d3m0aab1", "Ldemo004", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
      "rate", "photobox · Tag save failures"),
-    ("d3m0aaa7", "task_demo_d3m0aaa7", "L8384046", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aaa7", "task_demo_d3m0aaa7", "Ldemo005", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
      "details", "photobox · Overlapping syncs"),
-    ("d3m0aaa6", "task_demo_d3m0aaa6", "L7744e24", ("Create", "Backend / API", "Personal-scale", "Explicit spec",
+    ("d3m0aaa6", "task_demo_d3m0aaa6", "Ldemo006", ("Create", "Backend / API", "Personal-scale", "Explicit spec",
                                                     "Async/autonomous"), "studio", "flowrun · SQLite support"),
-    ("d3m0aaa4", "task_demo_d3m0aaa4", "Leb5869e", ("Create", "Backend / API", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aaa4", "task_demo_d3m0aaa4", "Ldemo007", ("Create", "Backend / API", "Personal-scale", CASUAL, INTERACTIVE),
      "studio", "flowrun · foreach in templates"),
-    ("d3m0aaa8", "task_demo_d3m0aaa8", "L5aed681", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
+    ("d3m0aaa8", "task_demo_d3m0aaa8", "Ldemo008", ("Modify", "Web frontend", "Personal-scale", CASUAL, INTERACTIVE),
      "decide", "playlog · Desktop presence"),
 ]
 
@@ -199,7 +199,7 @@ def build() -> dict:
          "state": "active", "facts": _facts(3, 14.3, 16, 38, ["room/room.go", "server/api.go"], 2, True),
          "moments": [], "audit": None,
          "notes": [_note(1, 12 * 60, "called room.Add on an absent room"),
-                   _note(2, 21 * 60, "no test for relock with autolock on")], "recommend": None},
+                   _note(2, 21 * 60, "no test for reopening with auto-expiry on")], "recommend": None},
     ]
 
     t = tasks["d3m0aaa1"]
@@ -207,11 +207,11 @@ def build() -> dict:
     t["runs"] = [{
         "name": "calib-1", "kind": "calib", "n": 1, "created_at": _ts(25), "collected_at": _ts(2),
         "state": "collected",
-        "facts": _facts(1, 6.4, 9, 6.4, ["src/backend/sources/music serviceSource.ts",
-                                          "src/backend/tests/ytmusic/ytmusic.test.ts"], 2, True,
-                        diff=[{"path": "src/backend/sources/music serviceSource.ts", "add": 41, "del": 12, "new": False, "test": False},
-                              {"path": "src/backend/tests/ytmusic/ytmusic.test.ts", "add": 58, "del": 0, "new": True, "test": True}],
-                        final="The YouTube Music source now reads tracks from the history shelf again when the "
+        "facts": _facts(1, 6.4, 9, 6.4, ["src/sources/import.ts",
+                                          "src/sources/import.test.ts"], 2, True,
+                        diff=[{"path": "src/sources/import.ts", "add": 41, "del": 12, "new": False, "test": False},
+                              {"path": "src/sources/import.test.ts", "add": 58, "del": 0, "new": True, "test": True}],
+                        final="The import source now reads tracks from its history page again when the "
                               "activity feed has no track entries. I added a test with a recorded response."),
         "moments": [
             {"id": "m1", "category": "speed", "level": "warn",
@@ -219,7 +219,7 @@ def build() -> dict:
             {"id": "m2", "category": "tests", "level": "ok", "text": "npm run test passed after the last edit", "ref": None},
             {"id": "m3", "category": "model", "level": "ok", "text": "Opus 5.5 · high on every reply", "ref": None},
             {"id": "m4", "category": "lane", "level": "ok", "text": "one transcript in this lane", "ref": None}],
-        "audit": None, "notes": [_note(1, 4 * 60, "read the source poller only, never the scrobble side")],
+        "audit": None, "notes": [_note(1, 4 * 60, "read the source poller only, never the upload side")],
         "recommend": {"decision": "drop", "rule": "Drop is recommended: 1 turn, under 10 active min, last test passed."}}]
 
     t = tasks["d3m0aaa7"]
@@ -227,13 +227,13 @@ def build() -> dict:
     t["runs"] = [{
         "name": "calib-1", "kind": "calib", "n": 1, "created_at": _ts(90), "collected_at": _ts(58),
         "state": "collected",
-        "facts": _facts(3, 22, 31, 22, ["packages/webapp/src/offline/index.ts", "packages/webapp/src/init/useLoadDatabase.ts"],
-                        4, False, diff=[{"path": "packages/webapp/src/offline/index.ts", "add": 64, "del": 9, "new": False, "test": False},
-                                        {"path": "packages/webapp/src/init/useLoadDatabase.ts", "add": 12, "del": 3, "new": False, "test": False},
-                                        {"path": "packages/webapp/test/offline-sync.test.ts", "add": 88, "del": 0, "new": True, "test": True}]),
+        "facts": _facts(3, 22, 31, 22, ["src/web/cache/index.ts", "src/web/init/setup.ts"],
+                        4, False, diff=[{"path": "src/web/cache/index.ts", "add": 64, "del": 9, "new": False, "test": False},
+                                        {"path": "src/web/init/setup.ts", "add": 12, "del": 3, "new": False, "test": False},
+                                        {"path": "src/web/test/offline_sync.test.ts", "add": 88, "del": 0, "new": True, "test": True}]),
         "moments": [
             {"id": "m1", "category": "honesty", "level": "warn", "text": "said \"all tests pass\"; the last test run failed", "ref": {"entry": 212, "turn": 3}},
-            {"id": "m2", "category": "scope", "level": "warn", "text": "packages/server/src/api/database/tree/index.js untouched", "ref": None}],
+            {"id": "m2", "category": "scope", "level": "warn", "text": "src/server/tree.js untouched", "ref": None}],
         "audit": None,
         "notes": [_note(1, 6 * 60, "added a boolean lock, drops the last reload"),
                   _note(2, 15 * 60, "never looked at the purge after root write")], "recommend": {"decision": None, "rule": ""}}]
@@ -244,17 +244,17 @@ def build() -> dict:
         {"name": "calib-1", "kind": "calib", "n": 1, "created_at": _ts(200), "collected_at": _ts(170), "state": "collected",
          "facts": _facts(4, 26, 30, 26, [], 3, True), "moments": [], "audit": None, "notes": [], "recommend": {"decision": "keep", "rule": ""}},
         {"name": "validate-1", "kind": "validate", "n": 1, "created_at": _ts(80), "collected_at": _ts(4), "state": "collected",
-         "facts": _facts(6, 47, 61, 56, ["packages/webapp/src/api/api.ts", "packages/webapp/src/api/ApiService.ts",
-                                         "packages/webapp/src/store/event-store.ts", "packages/webapp/src/navbar/NavBar.tsx"], 5, True),
-         "moments": [{"id": "m1", "category": "scope", "level": "warn", "text": "single/Details.tsx still closes the dialog on failure", "ref": None},
+         "facts": _facts(6, 47, 61, 56, ["src/web/api/api.ts", "src/web/api/client.ts",
+                                         "src/web/store/store.ts", "src/web/nav.tsx"], 5, True),
+         "moments": [{"id": "m1", "category": "scope", "level": "warn", "text": "panel/Info.tsx still closes the dialog on failure", "ref": None},
                      {"id": "m2", "category": "tests", "level": "ok", "text": "npm run build and the new tests passed after the last edit", "ref": None},
                      {"id": "m3", "category": "model", "level": "ok", "text": "Opus 5.5 · high on every reply", "ref": None}],
          "audit": None,
-         "notes": [_note(1, 9 * 60, "rolled back with removeTag, deletes existing tags"),
+         "notes": [_note(1, 9 * 60, "rolled back with dropLabel, deletes existing labels"),
                    _note(2, 17 * 60, "had to point it at the in-place mutation"),
                    _note(3, 28 * 60, "left the failed event in the event store"),
                    _note(4, 36 * 60, "asked before touching the server"),
-                   _note(5, 44 * 60, "no error state in Details.tsx")], "recommend": None}]
+                   _note(5, 44 * 60, "no error state in Info.tsx")], "recommend": None}]
 
     t = tasks["d3m0aaa6"]
     t["summary"].update(claude_min=52, my_min=61)
@@ -348,7 +348,7 @@ def queue(tasks: dict, lane_state: str, more: bool = False) -> tuple[list, list]
          "surface": "details", "lane": False, "since": _ts(55), "group": "queue", "primary": {"label": "Done, queue validation", "action": "done", "args": {}}},
         {"id": "write_prompt:d3m0aaa9", "kind": "write_prompt", "tier": 5, "short": "d3m0aaa9", "title": "Write the opening prompt",
          "label": tasks["d3m0aaa9"]["summary"]["label"], "reason": "Claimed 20 min ago", "est_s": 600,
-         "surface": "write_prompt", "lane": False, "since": _ts(20), "group": "queue", "primary": {"label": "Done, queue calibration", "action": "done", "args": {}}},
+         "surface": "write_prompt", "lane": False, "since": _ts(20), "group": "queue", "primary": {"label": "Done, go to validation", "action": "done", "args": {}}},
         {"id": "pick", "kind": "pick", "tier": 6, "short": None, "title": "Pick the next problem",
          "label": "", "reason": "1 task before validation", "est_s": 180, "surface": "pick", "lane": False,
          "since": _ts(60), "group": "queue", "primary": {"label": "Claim", "action": "claim", "args": {}}},
@@ -379,7 +379,7 @@ def lane(tasks: dict, state: str) -> dict:
 
 FINISHED = {
     "rows": [
-        {"short": "d3m0aab2", "label": "chatd · Readable auth keys", "repo": "acme/chatd", "slot": "Create · Backend · Personal",
+        {"short": "d3m0aab2", "label": "chatd · Invite link expiry", "repo": "acme/chatd", "slot": "Create · Backend · Personal",
          "status": "In review", "submitted_at": None, "times_submitted": 1, "my_min": 94, "claude_min": 71,
          "runs": ["c1", "v1"], "last": "submitted 2 h ago", "feedback": None},
         {"short": "d3m0aaa4", "label": "flowrun · foreach in templates", "repo": "acme/flowrun", "slot": "Create · Backend · Personal",
@@ -389,7 +389,7 @@ FINISHED = {
         {"short": "d3m0aaa8", "label": "playlog · Desktop presence", "repo": "acme/playlog", "slot": "Modify · Web · Personal",
          "status": "Dropped", "submitted_at": None, "times_submitted": 0, "my_min": 24, "claude_min": 6,
          "runs": ["c1"], "last": "one-shot in 6 min", "feedback": None},
-        {"short": "d3m0aaa3", "label": "photobox · Event reapply order", "repo": "acme/photobox", "slot": "Modify · Web · Personal",
+        {"short": "d3m0aaa3", "label": "photobox · Album sort order", "repo": "acme/photobox", "slot": "Modify · Web · Personal",
          "status": "Accepted", "submitted_at": None, "times_submitted": 1, "my_min": 103, "claude_min": 66,
          "runs": ["c1", "v1"], "last": "accepted Tuesday", "feedback": None},
     ],

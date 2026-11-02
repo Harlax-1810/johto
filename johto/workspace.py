@@ -237,6 +237,37 @@ def _num(v: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+_RUN_MINUTES: dict[tuple, float | None] = {}
+
+
+def run_minutes(rec: dict | None, d: Path | None = None) -> float | None:
+    """Claude's working minutes for a run record in task.json. Runs collected before working minutes existed
+    (2026-10-31) stored the older, larger measure, so their transcript is read again (looked for in the task
+    folder's own run first). None when the run has no minutes yet."""
+    rec = rec or {}
+    if rec.get("working_minutes") is not None:
+        return rec["working_minutes"]
+    stored = Path(rec["transcript"]) if rec.get("transcript") else None
+    if stored is not None:
+        here = Path(d) / rec["dir"] / "prework_output" / stored.name if d is not None and rec.get("dir") else None
+        p = here if here is not None and here.exists() else stored
+        try:
+            st = p.stat()
+        except OSError:
+            st = None
+        if st is not None:
+            key = (str(p), st.st_mtime_ns, st.st_size)
+            if key not in _RUN_MINUTES:
+                from . import transcript
+                try:
+                    _RUN_MINUTES[key] = transcript.summarize(p).get("working_minutes")
+                except Exception:   # an unreadable transcript keeps the stored number
+                    _RUN_MINUTES[key] = None
+            if _RUN_MINUTES[key] is not None:
+                return _RUN_MINUTES[key]
+    return rec.get("active_minutes")
+
+
 def to_fields(meta: dict, sub: dict, claude_minutes: float | None = None) -> dict:
     """Studio custom_fields from the task folder. Empty values are left out."""
     f: dict = {}

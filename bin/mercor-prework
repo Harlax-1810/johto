@@ -3,7 +3,8 @@
 # ~/.local/bin/mercor-prework on any machine that runs lanes over SSH.
 #
 # It runs Mercor's prework.py unchanged. With PREWORK_PORT_SLOT=1 it runs prework.py through
-# johto/prework_slot.py instead, which gives a second lane its own host ports and CPUs.
+# johto/prework_slot.py instead, which gives a second lane its own host ports and CPUs. After a successful
+# setup it runs johto/lane_login.py, which logs the lane in when ~/.mercor-prework/lane-token exists.
 #
 # Environment:
 #   PREWORK_PY          Mercor's prework.py (default ~/.local/share/mercor-prework/prework-v2/prework.py)
@@ -29,6 +30,20 @@ if [ -n "${PREWORK_PORT_SLOT:-}" ] && [ "$PREWORK_PORT_SLOT" != 0 ]; then
          "(set JOHTO_PREWORK_SLOT)" >&2
     exit 2
   fi
-  exec python3 -I "$slot_py" "$PREWORK_PY" "$PREWORK_PORT_SLOT" "$@"
+  python3 -I "$slot_py" "$PREWORK_PY" "$PREWORK_PORT_SLOT" "$@"
+else
+  python3 "$PREWORK_PY" "$@"
 fi
-exec python3 "$PREWORK_PY" "$@"
+rc=$?
+
+# After setup builds a new lane, log its Claude in with the token in ~/.mercor-prework/lane-token, if there is one
+# (johto/lane_login.py), so the lane needs no /login. It never replaces a login already there.
+if [ "$rc" = 0 ] && [ "${1:-}" = setup ]; then
+  here="$(cd "$(dirname "$(realpath "$0")")/.." && pwd)"
+  login_py="$here/johto/lane_login.py"
+  [ -f "$login_py" ] || login_py="$HOME/.local/share/mercor-prework/lane_login.py"
+  if [ -f "$login_py" ] && [ -f "${PREWORK_HOME:-$HOME/.mercor-prework}/lane-token" ]; then
+    python3 -I "$login_py" >&2 || true
+  fi
+fi
+exit "$rc"

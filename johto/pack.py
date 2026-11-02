@@ -1,8 +1,17 @@
 """Review packs: one repomix file (≤ 200k tokens) about a lane run, for pre-grading with another model.
 
-A pack holds the task (slot, repo, Austin's prompt), Claude's approach (a condensed transcript), the diff,
-the files that matter at their changed state, and an outside-the-lane Claude pass on what the run may
-have missed. It works mid-run (live transcript and `git diff` from the lane container) or after collect.
+A pack holds the task (slot, repo, Austin's prompt, the checkpoint it shows), Claude's approach (a condensed
+transcript), the diff and the files that matter at their changed state. With `ai`, it also holds an
+outside-the-lane Claude pass, last in the pack (3-outside-review/candidate-claims.md) and labeled as claims to
+check, so the reviewer judges the run before reading it. The guide asks for one reply format (REPLY_FORMAT:
+digest, findings table, detail, then a ```findings JSON block), shared with follow-up packs (johto/delta.py).
+
+It works mid-run (live transcript and `git diff` from the lane container) or after collect. The code comes from
+a clean clone at the pinned commit with the run's diff applied: a clone or checkout that fails stops the build,
+and hunks that don't apply mark the pack PARTIAL (first line, guide, header and packs.json), which
+johto.reviews never sends on its own. Each build works in its own folder under data/cache/packs/ and removes
+only that. Each pack is recorded in runs/<run>/packs.json (johto/delta.py), so the next turn can get a
+follow-up pack instead.
 
 This is difficulty research (allowed by Johto's LLM policy). Nothing here writes Austin's fields.
 """
@@ -14,6 +23,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -24,37 +34,99 @@ CLAUDE_BIN = config.CLAUDE_BIN   # JOHTO_CLAUDE_BIN; tests point it at a stub so
 PACKS = config.DATA / "cache" / "packs"
 MAX_TOKENS = 200_000
 
+REPLY_FORMAT = """## Reply format
+
+Reply in this order:
+
+1. `## Digest`, 250-400 words: whether the material evidence changed, the findings that changed most (up to
+   3), what the run deserves credit for, the verification limits, and only the uncertainty that could change
+   the judgment.
+2. `## Findings`, a table with one row per finding:
+   | ID | Finding | Status | Severity | Run result | How known | Evidence |
+3. `## Detail`: the evidence for each finding, by ID, with file:line references.
+4. Last, a fenced block tagged `findings` with a JSON array, one object per finding:
+
+```findings
+[{"id": "F1", "finding": "one factual sentence", "kind": "defect|credit|behavior|claim|limitation",
+  "status": "new|unchanged|resolved|worsened|withdrawn", "severity": "high|medium|low",
+  "result": "credit|partial|missed|unknown", "basis": "executed|isolated|traced|claimed",
+  "refs": ["path:line", "turn 2"], "limits": "what was not verified", "supersedes": null}]
+```
+
+- kind: defect (wrong or missing in the run's work), credit (done right, worth crediting), behavior (what the
+  code does on a path the request touches, as a code fact, and whether the run covered it), claim (something
+  Claude said, checked against the evidence), limitation (what this pack can't show).
+- result: how the run did on it (credit, partial, missed, unknown).
+- basis, how you know: executed (the full behavior was run and the output shows it), isolated (only a piece
+  was run, such as one test or a snippet), traced (by reading the code), claimed (only Claude says so).
+- limits: what you could not verify for this finding. Keep qualifications: an isolated run with a stand-in is
+  not "verified in the app".
+- status: new the first time. In a later reply, give every earlier ID again as unchanged, resolved, worsened
+  or withdrawn, and number new findings from the next free ID.
+- supersedes: the ID this finding replaces, else null.
+
+IDs stay the same for the whole chat. Keep separate findings separate.
+"""
+
+RULES = """## Rules
+
+- Research only: your review is evidence for the engineer, who judges the run and writes every field himself.
+- Don't give ratings, and don't write or suggest wording for the opening prompt, task goal, decision points,
+  difficulty notes or validation notes.
+- Don't suggest replies or prompts to send to Claude.
+- Don't frame findings as what a strong or weak model or engineer would do, or as what the task or a solution
+  must do. State code facts and run facts, with file:line.
+"""
+
 GUIDE = """# How to use this pack
+@@BANNER@@
+You are reviewing one run of Claude Code (Opus 5.5, high effort) on a coding task, for an engineer who
+writes evaluation tasks for Mercor's Project Johto. Everything you need is in this file. Read it in this
+order, and judge the run yourself before step 5:
 
-You are pre-grading one run of Claude Code (Opus 5.5, high effort) on a coding task, for an engineer who
-writes evaluation tasks for Mercor's Project Johto. Everything you need is in this file:
-
-1. `1-review/01-task.md`: the task slot, the repository at its pinned commit, and the engineer's opening prompt
-   (the only text Claude saw at the start; later human turns are in the transcript).
+1. `1-review/01-task.md`: the task slot, the repository at its pinned commit, the checkpoint this pack
+   shows, what the pack left out, and the engineer's opening prompt (the only text Claude saw at the start;
+   later human turns are in the transcript).
 2. `1-review/02-transcript.md`: what Claude did, in order: the human's messages, Claude's messages, every tool
    call (commands, edits, reads) and shortened tool output. Test runs keep more output.
 3. `1-review/03-final.diff`: the change Claude made so far, against the pinned commit.
-4. `1-review/04-outside-review.md`: a separate Claude pass, run outside the sandbox on a clean checkout with the
-   diff applied, listing what the run may have missed, with file and line evidence. Treat it as leads,
-   not truth; verify against the code in `2-code/`.
-5. `2-code/`: the files Claude changed (at their changed state) and the closely related files it read or
+4. `2-code/`: the files Claude changed (at their changed state) and the closely related files it read or
    that the change depends on, so you can check claims against the real code.
+@@OUTSIDE@@
 
 Please assess:
 
-- Did Claude solve the actual problem (root cause, not symptom)? What would a strong senior engineer
-  have done differently?
-- What did it miss: edge cases, interactions across files or layers, existing data or behaviour it
-  could break, paths it never tested, claims it made without verifying them?
+- Did Claude solve the actual problem (root cause, not symptom)? What did the run miss or get wrong, with
+  file:line?
+- Which edge cases, interactions across files or layers, existing data or behaviour it could break, paths
+  it never tested, and claims it made without verifying them?
+- What did it get right that a grader should credit?
 - How much did the human have to steer it, and where?
 - For Johto's scales (One-shot yes/no; Task Success 1-5: 1 failed, 2 partial with major issues, 3
   completed but highly inefficient or non-optimal with notable problems, 4 successful with minor or
-  style issues, 5 completely successful; Steering 1-5: 1 constant input ... 5 none), list the evidence
-  only: file:line references, what was missed, which claims are unverified, and where the human
-  steered. Do not write prose explanations of ratings; the engineer writes his own notes.
+  style issues, 5 completely successful; Steering 1-5: 1 constant input ... 5 none), give the evidence
+  only: file:line references, what was missed, which claims are unverified, and where the human steered.
 
-Give concrete file and line references. Be skeptical of the run's own summary of what it did.
-"""
+Be skeptical of the run's own summary of what it did, and say what you could not verify.
+
+""" + REPLY_FORMAT + "\n" + RULES
+
+OUTSIDE_STEP = """5. Last, `3-outside-review/candidate-claims.md`: claims from a separate Claude pass, run outside the
+   sandbox on a clean checkout with the diff applied. They are candidates to check, not evidence. Read them
+   only after your own judgment of the task, run and code; check each against the code, and keep, correct
+   or drop it on what you find. Findings that come only from that file are basis "claimed"."""
+NO_OUTSIDE = "5. There is no outside review in this pack: the findings are yours alone."
+
+
+def guide(outside: bool, partial: str | None = None) -> str:
+    """The pack's 00-grading-guide.md: the reading order (the outside review last, when there is one), what to
+    assess, REPLY_FORMAT and RULES. A PARTIAL banner goes first when the checkout missed some of the diff."""
+    banner = ""
+    if partial:
+        banner = (f"\n> **{partial}.** The code in `2-code/` (and the outside review's checkout) lacks those "
+                  "changes; `1-review/03-final.diff` is complete. Judge those files from the diff.\n")
+    return GUIDE.replace("@@BANNER@@", banner).replace("@@OUTSIDE@@", OUTSIDE_STEP if outside else NO_OUTSIDE)
+
 
 REVIEW_PROMPT = """You are reviewing one run of an AI coding agent, from outside its sandbox. The current
 directory is a clean checkout of the repository at the task's pinned commit with the agent's diff applied.
@@ -157,16 +229,31 @@ def _live_diff(run_dir: Path) -> str | None:
     return r.stdout if r.returncode == 0 else None
 
 
-def gather(task_dir: Path, run_name: str | None) -> dict:
+def gather(task_dir: Path, run_name: str | None, *, live: bool | None = None) -> dict:
+    """The run's transcript and diff for a pack. A collected run uses what was collected (the transcript and
+    final.diff the submission holds), unless `live`; a run under way reads its lane. Fake mode never reaches a
+    lane or the PC. Stops with a plain message when the diff can't be read: a pack of an unknown tree would show
+    "no changes" and GPT would review code Claude never wrote."""
     run_dir = _pick_run(task_dir, run_name)
     meta = workspace.load(task_dir)
-    live_t, live_d = _live_transcript(run_dir), _live_diff(run_dir)
+    rec = next((r for r in meta.get("runs", []) if r.get("dir") == f"runs/{run_dir.name}"), {})
+    if live is None:
+        live = not rec.get("collected_at")
+    live = bool(live) and not config.FAKE
+    live_t = _live_transcript(run_dir) if live else None
+    live_d = _live_diff(run_dir) if live else None
     logs = transcript.find(run_dir)
     tpath = live_t or (logs[-1] if logs else None)
     diff_file = run_dir / "prework_output" / "final.diff"
-    diff = live_d if live_d is not None else (diff_file.read_text(errors="replace") if diff_file.exists() else "")
     if not tpath:
         raise SystemExit(f"No transcript for {run_dir.name} yet (start Claude in the lane first).")
+    if live_d is not None:
+        diff = live_d
+    elif diff_file.exists():
+        diff = diff_file.read_text(errors="replace")
+    else:
+        raise SystemExit(f"{run_dir.name}'s diff can't be read: its lane isn't running and the run isn't collected. "
+                         f"Collect it first: johto collect {Path(task_dir).name} {run_dir.name}")
     return {"meta": meta, "run_dir": run_dir, "transcript_path": tpath, "diff": diff,
             "live": live_t is not None, "sub": workspace.parse_submission(task_dir)}
 
@@ -181,31 +268,71 @@ def _clip(text: str, head: int, tail: int = 0) -> str:
     return "\n".join(lines[:head] + [f"… [{cut} lines cut] …"] + (lines[-tail:] if tail else []))
 
 
-def condense(tpath: Path, out_lines: int = 40) -> tuple[str, dict]:
-    """Markdown of the run: human turns, Claude's text, tool calls with shortened output."""
+def _after(e: dict, since) -> bool:
+    """True when entry e is later than `since` (a datetime). Entries without a timestamp go with their neighbours."""
+    ts = transcript._ts(e.get("timestamp"))
+    return ts is None or ts > since
+
+
+def condense(tpath: Path, out_lines: int = 40, since: str | None = None,
+             brief_compactions: bool = False) -> tuple[str, dict]:
+    """Markdown of the run: human turns, Claude's text, tool calls with shortened output.
+
+    `since` (an ISO timestamp, for follow-up packs) keeps only entries after it; earlier entries still number the
+    turns and match tool results to their calls. `brief_compactions` turns Claude Code's context-compaction
+    summaries (pages of recap sent as a user message) into one line."""
     entries = []
     for line in Path(tpath).read_text(errors="ignore").splitlines():
         try:
             entries.append(json.loads(line))
         except json.JSONDecodeError:
             pass
+    if brief_compactions:
+        compacted = {id(e) for e in entries if e.get("isCompactSummary") and e.get("type") == "user"}
+    else:
+        compacted = set()
+    after = transcript._ts(since) if since else None
+    started = after is None
     calls, reads, md = {}, collections.Counter(), []
     turn = 0
-    humans = iter(transcript.human_messages(entries))
+    cont = None   # a turn that was under way at `since`: its heading goes before its next tool call or message
+    humans = iter(transcript.human_messages([e for e in entries if id(e) not in compacted]))
+
+    def emit(text: str) -> None:
+        nonlocal cont
+        if cont:
+            md.append(cont)
+            cont = None
+        md.append(text)
+
     for e in entries:
         if e.get("isSidechain"):
             continue
         ts = (e.get("timestamp") or "")[11:19]
+        if not started and _after(e, after) and e.get("timestamp"):
+            started = True
+            if turn:
+                label = "opening prompt" if turn == 1 else f"follow-up {turn - 1}"
+                cont = f"\n## Continuing the {label}, after the last pack\n"
+        if id(e) in compacted:
+            if started:
+                md.append(f"\n*(Claude Code compacted its context at {ts}.)*\n")
+            continue
         if e.get("type") == "user":
             human = transcript._human_text(e)
             if human is not None and e.get("timestamp"):
                 hm = next(humans, None)
+                cont = None
                 if hm and not hm["counted"]:
-                    md.append(f"\n## Human ({ts}, not counted: {hm['note']})\n\n{human}\n")
+                    if started:
+                        md.append(f"\n## Human ({ts}, not counted: {hm['note']})\n\n{human}\n")
                 else:
                     turn += 1
                     label = "opening prompt" if turn == 1 else f"follow-up {turn - 1}"
-                    md.append(f"\n## Human, {label} ({ts})\n\n{human}\n")
+                    if started:
+                        md.append(f"\n## Human, {label} ({ts})\n\n{human}\n")
+                continue
+            if not started:
                 continue
             for x in transcript._content(e) or []:
                 if isinstance(x, dict) and x.get("type") == "tool_result":
@@ -218,50 +345,120 @@ def condense(tpath: Path, out_lines: int = 40) -> tuple[str, dict]:
                     n = out_lines * 3 if is_test else out_lines
                     err = " (error)" if x.get("is_error") else ""
                     if call.get("name") in ("Read", "Glob", "Grep") and not err:
-                        md.append(f"→ {len(content.splitlines())} lines{err}\n")
+                        emit(f"→ {len(content.splitlines())} lines{err}\n")
                     else:
-                        md.append(f"→ output{err}:\n```\n{_clip(content, n * 2 // 3, n // 3)}\n```\n")
+                        emit(f"→ output{err}:\n```\n{_clip(content, n * 2 // 3, n // 3)}\n```\n")
         elif e.get("type") == "assistant":
             for x in transcript._content(e) or []:
                 if not isinstance(x, dict):
                     continue
+                if x.get("type") == "tool_use":   # always noted, so a later tool result finds its call
+                    inp = x.get("input") or {}
+                    calls[x.get("id")] = {"name": x.get("name"), "cmd": inp.get("command") or ""}
+                if not started:
+                    continue
                 if x.get("type") == "text" and x.get("text", "").strip():
-                    md.append(f"\n**Claude ({ts}):** {x['text'].strip()}\n")
+                    emit(f"\n**Claude ({ts}):** {x['text'].strip()}\n")
                 elif x.get("type") == "tool_use":
                     name, inp = x.get("name"), x.get("input") or {}
                     cmd = inp.get("command") or ""
-                    calls[x.get("id")] = {"name": name, "cmd": cmd}
                     if name == "Bash":
-                        md.append(f"\n`{name}` ({ts}): `{cmd[:400]}`\n")
+                        emit(f"\n`{name}` ({ts}): `{cmd[:400]}`\n")
                     elif name in ("Read",):
                         reads[inp.get("file_path", "")] += 1
                         rng = f" lines {inp.get('offset')}+{inp.get('limit')}" if inp.get("offset") else ""
-                        md.append(f"\n`Read` {inp.get('file_path')}{rng}\n")
+                        emit(f"\n`Read` {inp.get('file_path')}{rng}\n")
                     elif name in ("Edit", "MultiEdit", "Write"):
                         body = inp.get("new_string") or inp.get("content") or json.dumps(inp.get("edits", ""))[:1500]
-                        md.append(f"\n`{name}` {inp.get('file_path')}:\n```\n{_clip(str(body), 30, 5)}\n```\n")
+                        emit(f"\n`{name}` {inp.get('file_path')}:\n```\n{_clip(str(body), 30, 5)}\n```\n")
                     else:
-                        md.append(f"\n`{name}` {json.dumps(inp)[:300]}\n")
+                        emit(f"\n`{name}` {json.dumps(inp)[:300]}\n")
     return "".join(md), {"reads": reads, "turns": turn}
 
 
 # --- Outside review ----------------------------------------------------------------
 
-def checkout(meta: dict, diff: str, dest: Path) -> tuple[Path, str]:
-    """Clean clone at the pinned commit with the run's diff applied. Returns (path, apply note)."""
+GIT_URL = "https://github.com/{}.git"   # tests point this at a local repo
+
+
+def _hunks(diff: str) -> dict[str, int]:
+    """Hunks per file in a diff, keyed by the path `git apply` names (a file with no hunks, such as a binary
+    patch, counts as one)."""
+    out: dict[str, int] = {}
+    for part in re.split(r"(?m)^(?=diff --git )", diff or ""):
+        m = re.match(r"diff --git a/(.+?) b/(.+)", part)
+        if m:
+            out[m.group(2).strip()] = max(1, len(re.findall(r"(?m)^@@ ", part)))
+    return out
+
+
+def apply_report(stderr: str, diff: str) -> str | None:
+    """"PARTIAL: N hunks rejected in a, b" from `git apply --reject`'s output, or None when all of it applied.
+    A file git couldn't patch at all (missing, already there) counts all its hunks."""
+    rejected: collections.Counter = collections.Counter()
+    current = None
+    for line in stderr.splitlines():
+        m = re.match(r"Applying patch (.+?) with \d+ rejects?\.\.\.$", line)
+        if m:
+            current = m.group(1)
+        elif line.startswith("Rejected hunk #") and current:
+            rejected[current] += 1
+    checked = re.findall(r"(?m)^Checking patch (.+?)\.\.\.$", stderr)
+    applied = set(re.findall(r"(?m)^Appl(?:ying|ied) patch (.+?)(?: with \d+ rejects?\.\.\.| cleanly\.)$", stderr))
+    hunks = _hunks(diff)
+    for f in checked:
+        if f not in applied:
+            rejected[f] += hunks.get(f, 1)
+    if not rejected:
+        return None
+    n, files = sum(rejected.values()), sorted(rejected)
+    names = ", ".join(files[:8]) + (f" and {len(files) - 8} more" if len(files) > 8 else "")
+    return f"PARTIAL: {n} hunk{'' if n == 1 else 's'} rejected in {names}"
+
+
+def checkout(meta: dict, diff: str, dest: Path) -> tuple[Path, str, str | None]:
+    """Clean clone at the pinned commit with the run's diff applied. Returns (path, apply note, partial), where
+    partial is apply_report()'s "PARTIAL: ..." when some hunks didn't apply. A clone or checkout that fails,
+    or lands on another commit, raises SystemExit: a pack of the wrong tree would mislead."""
     repo = meta["repo"]
     if dest.exists():
         shutil.rmtree(dest)
-    _run(["git", "clone", "-q", "--filter=blob:none", f"https://github.com/{repo['full_name']}.git", str(dest)], timeout=900)
-    _run(["git", "checkout", "-q", repo["commit"]], cwd=dest, timeout=300)
+    r = _run(["git", "clone", "-q", "--filter=blob:none", GIT_URL.format(repo["full_name"]), str(dest)], timeout=900)
+    if r.returncode != 0:
+        raise SystemExit(f"Couldn't clone {repo['full_name']}, so no pack was made: {r.stderr.strip()[-300:]}")
+    r = _run(["git", "checkout", "-q", repo["commit"]], cwd=dest, timeout=300)
+    head = _run(["git", "rev-parse", "HEAD"], cwd=dest, timeout=60).stdout.strip()
+    if r.returncode != 0 or not head or not head.startswith(str(repo["commit"]).strip()[:40]):
+        raise SystemExit(f"Couldn't check out {repo['full_name']} at {str(repo['commit'])[:12]}, so no pack was made"
+                         + (f": {r.stderr.strip()[-300:]}" if r.stderr.strip() else f" (HEAD is {head[:12] or '?'})."))
     if not diff.strip():
         strip_claude_settings(dest)
-        return dest, "no changes"
+        return dest, "no changes", None
     patch = dest.parent / "run.diff"
-    patch.write_text(diff)
+    patch.write_text(diff if diff.endswith("\n") else diff + "\n")
     r = _run(["git", "apply", "--reject", "--whitespace=nowarn", str(patch)], cwd=dest, timeout=120)
     strip_claude_settings(dest)
-    return dest, "applied" if r.returncode == 0 else f"applied with rejects: {r.stderr.strip()[:300]}"
+    if r.returncode == 0:
+        return dest, "applied", None
+    partial = apply_report(r.stderr, diff) or f"PARTIAL: the diff didn't apply ({r.stderr.strip()[:200]})"
+    return dest, partial, partial
+
+
+def cached_repo(full_name: str, commit: str) -> Path:
+    """A small bare clone holding one commit's trees (blobs arrive on demand), kept in data/cache/repos/ so
+    follow-up packs can rebuild a run's states without a full clone each time."""
+    dest = config.DATA / "cache" / "repos" / (full_name.replace("/", "__") + ".git")
+    if _run(["git", "--git-dir", str(dest), "cat-file", "-e", f"{commit}^{{commit}}"]).returncode == 0:
+        return dest
+    if not dest.exists():
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        _run(["git", "init", "-q", "--bare", str(dest)])
+        _run(["git", "--git-dir", str(dest), "remote", "add", "origin", GIT_URL.format(full_name)])
+    r = _run(["git", "--git-dir", str(dest), "fetch", "-q", "--depth", "1", "--filter=blob:none", "origin", commit],
+             timeout=600)
+    if r.returncode != 0:
+        raise RuntimeError(f"git fetch of {full_name}@{commit[:8]} failed: {r.stderr.strip()[-300:]}")
+    return dest
 
 
 def strip_claude_settings(dest: Path) -> None:
@@ -331,26 +528,60 @@ def _rel(path: str, clone: Path) -> str | None:
     return None
 
 
+def _covered(tpath: Path, diff: str) -> dict | None:
+    """How far into the run a pack reaches (delta.state), so the next follow-up starts where this one stopped."""
+    try:
+        from . import delta
+        return delta.state(tpath, diff)
+    except Exception:
+        return None
+
+
+def _record(task_dir: Path, run: str, out: Path, covered: dict | None, diff: str, tokens: int, log, **extra) -> None:
+    """Add the pack to runs/<run>/packs.json (delta.record_pack). A failure here never loses the pack."""
+    try:
+        from . import delta
+        st = dict(covered or {})
+        delta.record_pack(task_dir, run, out, "full", st.pop("turn", None), tokens=tokens, diff=diff, **st, **extra)
+    except Exception as e:
+        log(f"warning: the pack is made but isn't recorded in packs.json ({e})")
+
+
 def _tokens(text: str) -> int:
     return len(text) // 4  # repomix reports the real count; this is the budget estimate
 
 
 def build(task_dir: Path, run_name: str | None = None, max_tokens: int = MAX_TOKENS, ai: bool = True,
           log=print) -> Path:
-    """Make the pack; the clone and work folder are always removed, even on failure."""
-    before = set(PACKS.glob("*")) if PACKS.exists() else set()
+    """Make the pack in a work folder of its own under PACKS (the clone and the pack's files), removed
+    afterwards, even on failure. Other builds running at the same time keep theirs."""
+    task_dir = Path(task_dir)
+    PACKS.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix=f"{task_dir.name}-{run_name or 'run'}-", dir=PACKS))
     try:
-        return _build(task_dir, run_name, max_tokens, ai, log)
+        return _build(task_dir, run_name, max_tokens, ai, log, work)
     finally:
-        for p in (set(PACKS.glob("*")) if PACKS.exists() else set()) - before:
-            shutil.rmtree(p, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
 
 
-def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log) -> Path:
+def _host(run_dir: Path) -> str:
+    remote = _remote(run_dir)
+    return f"{remote[0]} (the lane runs there)" if remote else "this Mac"
+
+
+def _checkpoint(run_dir: Path, covered: dict | None) -> list[str]:
+    """01-task.md's checkpoint lines: where the run is and how far into it this pack reaches."""
+    c = covered or {}
+    reach = (f"turn {c.get('turn')}, {c.get('transcript_entries')} transcript entries, the last at "
+             f"{c.get('last_entry_at')}" if c.get("last_entry_at") else "unknown")
+    return [f"- Host: {_host(run_dir)}",
+            f"- Checkpoint: {reach}; diff fingerprint {c.get('diff_sha') or '?'}"]
+
+
+def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log, work: Path) -> Path:
     g = gather(task_dir, run_name)
     meta, run_dir, sub = g["meta"], g["run_dir"], g["sub"]
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    work = PACKS / f"{task_dir.name}-{run_dir.name}-{stamp}"
     pack = work / "pack"
     rv, code = pack / "1-review", pack / "2-code"
     rv.mkdir(parents=True)
@@ -361,22 +592,23 @@ def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log)
     slot, repo = meta["slot"], meta["repo"]
     prompt = sub["sections"].get("Opening Prompt", "").strip()
     first = transcript.summarize(g["transcript_path"]).get("first_prompt") or ""
-    task_md = "\n".join([
-        f"# Task {meta['task_name']}", "",
-        f"- Slot: {' · '.join(str(slot[k]) for k in ('action', 'domain', 'codebase_type', 'prompt_style', 'interaction_mode'))}",
-        f"- Repository: {repo['pinned_url']} ({repo.get('language')})",
-        f"- Run: {run_dir.name} ({'in progress' if g['live'] else 'collected'})", "",
-        "## Opening prompt (what Claude saw first)", "", first.strip() or prompt or "(not found)", ""])
-    lead = meta.get("lead_id")
+    covered = _covered(g["transcript_path"], g["diff"])   # what this pack shows, read before condensing
+    head = [f"# Task {meta['task_name']}", "",
+            f"- Slot: {' · '.join(str(slot[k]) for k in ('action', 'domain', 'codebase_type', 'prompt_style', 'interaction_mode'))}",
+            f"- Repository: {repo['pinned_url']} ({repo.get('language')})",
+            f"- Run: {run_dir.name} ({'in progress' if g['live'] else 'collected'})",
+            *_checkpoint(run_dir, covered)]
+    opening = ["", "## Opening prompt (what Claude saw first)", "", first.strip() or prompt or "(not found)", ""]
     brief = (task_dir / "brief.md")
-    if brief.exists():
-        task_md += "\n## Research notes behind this task (AI research, for context)\n\n" + brief.read_text()
+    notes = ("\n## Research notes behind this task (AI research, for context)\n\n" + brief.read_text()
+             if brief.exists() else "")
 
     condensed, stats = condense(g["transcript_path"])
     log(f"Transcript: {stats['turns']} human turn{'' if stats['turns'] == 1 else 's'}, {len(condensed):,} characters condensed")
 
-    clone, note = checkout(meta, g["diff"], work / "repo")
+    clone, note, partial = checkout(meta, g["diff"], work / "repo")
     log(f"Checkout at {repo['commit'][:8]}: {note}")
+    task_md = "\n".join(head + opening) + notes
 
     review = None
     if ai:
@@ -386,20 +618,23 @@ def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log)
             log(f"Outside review: {len(review.get('misses', []))} possible misses"
                 + (f", ${review['_cost_usd']:.2f}" if review.get("_cost_usd") else ""))
         else:
-            log("Outside review failed; the pack notes it.")
+            log("Outside review failed; the pack goes without it.")
 
-    (rv / "00-grading-guide.md").write_text(GUIDE)
-    (rv / "01-task.md").write_text(task_md)
+    outside = bool(review and not review.get("error"))
+    (rv / "00-grading-guide.md").write_text(guide(outside, partial))
     (rv / "03-final.diff").write_text(g["diff"] or "(no changes yet)\n")
-    (rv / "04-outside-review.md").write_text(render_review(review))
+    if outside:
+        # Last in the pack (repomix puts folders in name order), so the reviewer meets it after judging.
+        (pack / "3-outside-review").mkdir()
+        (pack / "3-outside-review" / "candidate-claims.md").write_text(render_review(review))
 
     # Files: changed first, then the review's picks, then the most-read files.
     changed = _changed_files(g["diff"])
     picks = (review or {}).get("extra_files", []) if review and not review.get("error") else []
     read_rel = [r for r in (_rel(p, clone) for p, _ in stats["reads"].most_common(40)) if r]
     ordered = list(dict.fromkeys(changed + picks + read_rel))
-    fixed = sum(_tokens((rv / f).read_text()) for f in ("00-grading-guide.md", "01-task.md", "03-final.diff", "04-outside-review.md"))
-    budget = max_tokens - fixed - 3_000
+    fixed = sum(_tokens(f.read_text()) for f in (*rv.glob("*"), *(pack / "3-outside-review").glob("*.md")))
+    budget = max_tokens - fixed - _tokens(task_md) - 1_000 - 3_000   # 1,000: the coverage lines added below
     t_budget = int(budget * 0.45)
     if _tokens(condensed) > t_budget:
         for n in (20, 10, 5, 2):
@@ -409,6 +644,7 @@ def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log)
         if _tokens(condensed) > t_budget:
             keep = t_budget * 4
             condensed = condensed[: keep // 2] + "\n\n… [middle of the run cut to fit] …\n\n" + condensed[-keep // 2:]
+    cut = "cut to fit" in condensed
     (rv / "02-transcript.md").write_text(condensed)
     left = budget - _tokens(condensed)
     included, skipped = [], []
@@ -426,19 +662,33 @@ def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log)
         else:
             skipped.append(rel)
     log(f"Files: {len(included)} included, {len(skipped)} left out for size")
+    coverage = ["", "## What this pack leaves out", "",
+                f"- Checkout: {partial + ' (the diff in 03-final.diff is complete)' if partial else note}",
+                f"- Transcript: {'shortened, and the middle cut to fit' if cut else 'tool output shortened; every message and tool call kept'}",
+                "- Files left out for size: " + (", ".join(f"`{p}`" for p in skipped[:30])
+                                                 + (f" and {len(skipped) - 30} more" if len(skipped) > 30 else "")
+                                                 if skipped else "none")]
+    (rv / "01-task.md").write_text("\n".join(head + coverage + opening) + notes)
 
     out = run_dir / f"review-pack-{stamp}.xml"
     header = (f"Johto review pack · {meta['task_name']} · {run_dir.name} · {repo['full_name']}@{repo['commit'][:8]} · "
               f"made {time.strftime('%Y-%m-%d %H:%M')}. Start with 1-review/00-grading-guide.md.")
+    if partial:
+        header = f"{partial}. " + header
     r = _run(REPOMIX + [str(pack), "--style", "xml", "--output", str(out), "--header-text", header,
-                        "--no-gitignore", "--no-security-check", "--top-files-len", "8"], timeout=600)
+                        "--no-gitignore", "--no-git-sort-by-changes", "--no-security-check", "--top-files-len", "8"],
+             timeout=600)
     if r.returncode != 0:
         raise SystemExit(f"repomix failed: {r.stderr[-800:]}")
+    if partial:
+        out.write_text(f"{partial}. Some of the run's diff is missing from 2-code/; see 1-review/00-grading-guide.md.\n\n"
+                       + out.read_text())
     m = re.search(r"Total Tokens:\s*([\d,]+)", r.stdout)
     tokens = int(m.group(1).replace(",", "")) if m else _tokens(out.read_text())
     log(f"Pack: {out} ({tokens:,} tokens)")
     if tokens > max_tokens:
         log(f"warning: {tokens:,} tokens is over the {max_tokens:,} budget; rerun with --max-tokens lower to shrink files")
-    shutil.rmtree(work / "repo", ignore_errors=True)
-    shutil.rmtree(work, ignore_errors=True)
+    _record(task_dir, run_dir.name, out, covered, g["diff"], tokens, log, outside_review=outside, partial=partial)
+    if partial:
+        log(f"{partial}: the pack says so, and it won't be sent to GPT Pro without --force.")
     return out

@@ -2,9 +2,15 @@
 
 Sources: the AI sections of brief.md (lead and dossier research), every lead on the same repo (title, facts,
 mechanism, verify, one-shot reason, repo notes), the task's dossier (and any dossier for its repo), AutoQC
-justifications, Claude's messages in every run's transcript (collected or live), and the outside review in
-each review pack. Items of kind "_human" are Austin's own turns in the lane: never a source, only used to
-drop echoes of his words from Claude's text. Nothing is written.
+justifications, Claude's messages in every run's transcript (collected or live), the outside review in each
+review pack and follow-up pack, saved outside reviews (reviews/*.md, such as GPT Pro's), the grading table's
+AI text (grading.json, not the columns Austin marks), the writing kit (kit.md), checks (checks/*.md) and the
+facts helper chats showed him (notes/ai-*.md), the repo brief of each of those dossiers with every earlier
+version of it (data/dossiers/<id>.brief.json and runs/<id>.brief.*.json: research he reads right before the
+prompt, so kind "lead"), the task understanding beside the prompt with its earlier versions (understand.json and
+understand-history/*.json, kind "lead"), and the findings in plain words (plain.json, kind "grading"). Items of kind "_human"
+are Austin's own turns in the lane: never a source, only used to drop echoes of his words from Claude's text.
+Nothing is written.
 """
 from __future__ import annotations
 
@@ -18,7 +24,13 @@ from ... import config, workspace
 _CACHE: dict[str, tuple[tuple, list[dict]]] = {}
 _LOCK = threading.Lock()
 _AI_BRIEF = re.compile(r"^## (Lead|Dossier\b.*)$", re.M)
-_REVIEW = re.compile(r'<file path="1-review/04-outside-review\.md">\n?(.*?)</file>', re.S)
+_REVIEW = re.compile(r'<file path="[^"]*outside-review[^"]*\.md">\n?(.*?)</file>', re.S)
+_FRONT = re.compile(r"\A---\n.*?\n---\n", re.S)
+_REVIEW_NAME = re.compile(r"^(?P<run>.+?)-t(?P<turn>\d+)-(?P<source>[\w.-]+)\.md$")
+SOURCE_NAMES = {"gptpro": "GPT Pro", "gpt": "ChatGPT", "chatgpt": "ChatGPT", "claude": "Claude"}
+# The grading.json row keys that hold AI text (johto/grading.py): the finding, its verification limits and the
+# verify run's summary. Austin's own columns (scope, marks) and the bookkeeping keys are never read.
+_GRADING_AI = ("finding", "limits")
 
 
 def _mtime(p: Path | None) -> float:
@@ -132,9 +144,185 @@ def _dossier_docs(meta: dict) -> list[tuple[str, Path | None, dict]]:
     return out
 
 
+# Brief keys that hold no prose the model wrote for Austin: the server's stamps, ids, enums, dates, URLs and
+# provenance. Every other string in a brief is a source.
+_BRIEF_SKIP = {"schema", "dossier_id", "dossier_sha", "repo", "generated_at", "model", "elapsed_s", "cost_usd",
+               "rivals_checked", "opportunity_id", "id", "near_seed", "from", "actions", "when", "source", "level"}
+
+
+def _brief_strings(v, out: list[str], key: str | None = None) -> None:
+    """Every model-written string in a repo brief, whatever its length."""
+    if key in _BRIEF_SKIP:
+        return
+    if isinstance(v, str):
+        if v.strip():
+            out.append(v)
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            _brief_strings(x, out, k)
+    elif isinstance(v, list):
+        for x in v:
+            _brief_strings(x, out, key)
+
+
+def _brief_files(docs: list[tuple[str, Path | None, dict]]) -> list[tuple[str, Path]]:
+    """(dossier id, brief file) for each dossier's current brief and its earlier versions."""
+    try:
+        from ...dossier import brief
+    except Exception:
+        return []
+    out = []
+    for i, _, _ in docs:
+        try:
+            paths = [brief.path(i), *brief.history(i)]
+        except Exception:
+            continue
+        out += [(i, p) for p in paths if p.exists()]
+    return out
+
+
+def _brief_items(files: list[tuple[str, Path]]) -> list[dict]:
+    out = []
+    for i, p in files:
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        texts: list[str] = []
+        _brief_strings(doc, texts)
+        for t in dict.fromkeys(texts):
+            out.append({"kind": "lead", "ref": f"{i}.brief", "label": "Repo brief", "text": t})
+    return out
+
+
+def _plain_items(p: Path) -> list[dict]:
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return []
+    rows = data.get("rows") if isinstance(data, dict) else None
+    out = []
+    for rid, rec in (rows or {}).items() if isinstance(rows, dict) else []:
+        text = rec.get("plain") if isinstance(rec, dict) else None
+        if isinstance(text, str) and text.strip():
+            out.append({"kind": "grading", "ref": f"plain.json#{rid}", "label": "Finding in plain words", "text": text})
+    return out
+
+
+# Keys of a task understanding that hold ids, enums and paths, not prose the model wrote for Austin.
+_UNDERSTAND_SKIP = {"url", "path", "verdict", "status", "confirmed"}
+
+
+def _understand_files(d: Path) -> list[Path]:
+    return [p for p in (d / "understand.json",) if p.exists()] + sorted((d / "understand-history").glob("*.json"))
+
+
+def _understand_items(files: list[Path]) -> list[dict]:
+    out, seen = [], set()
+    for p in files:
+        try:
+            doc = json.loads(p.read_text())
+        except (OSError, ValueError):
+            continue
+        texts: list[str] = []
+
+        def walk(v, key=None):
+            if key in _UNDERSTAND_SKIP:
+                return
+            if isinstance(v, str):
+                if v.strip():
+                    texts.append(v)
+            elif isinstance(v, dict):
+                for k, x in v.items():
+                    walk(x, k)
+            elif isinstance(v, list):
+                for x in v:
+                    walk(x, key)
+        walk((doc or {}).get("doc") if isinstance(doc, dict) else None)
+        for t in texts:
+            if t not in seen:
+                seen.add(t)
+                out.append({"kind": "lead", "ref": p.name, "label": "Task understanding", "text": t})
+    return out
+
+
 def _sources(d: Path, meta: dict) -> tuple[list[Path], list[Path], Path]:
-    packs = sorted((d / "runs").glob("*/review-pack-*.xml"))
+    packs = sorted([*(d / "runs").glob("*/review-pack-*.xml"), *(d / "runs").glob("*/review-followup-*.xml")])
     return _transcripts(d, meta), packs, config.DATA / "scout" / "leads.json"
+
+
+def _ai_files(d: Path) -> dict[str, list[Path]]:
+    """The files the newer features write AI text into, by item kind."""
+    return {"review": sorted((d / "reviews").glob("*.md")),
+            "grading": [p for p in (d / "grading.json",) if p.exists()],
+            "kit": [p for p in (d / "kit.md",) if p.exists()],
+            "check": sorted((d / "checks").glob("*.md")),
+            "notes": sorted((d / "notes").glob("ai-*.md"))}
+
+
+def _read(p: Path) -> str:
+    try:
+        return p.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _review_label(p: Path, text: str) -> str:
+    """'Outside review: GPT Pro, validate-1 turn 2' from its front matter (else the file name)."""
+    m = _REVIEW_NAME.match(p.name)
+    fm = _FRONT.match(text)
+    front = dict(re.findall(r"^(\w+):[ \t]*(\S.*?)\s*$", fm.group(0), re.M)) if fm else {}
+    src = front.get("source") or (m.group("source") if m else "") or "outside"
+    run = front.get("run") or (m.group("run") if m else "")
+    turn = front.get("turn") or (str(int(m.group("turn"))) if m else "")
+    where = f"{run} turn {turn}" if run and turn else run
+    return f"Outside review: {SOURCE_NAMES.get(src.lower(), src)}" + (f", {where}" if where else "")
+
+
+def _grading_texts(row: dict) -> list[str]:
+    """The AI text in one grading row: finding, limits and verify.summary (strings of 6+ words)."""
+    texts: list[str] = []
+    for k in _GRADING_AI:
+        _strings(row.get(k), texts)
+    v = row.get("verify")
+    if isinstance(v, dict):
+        _strings(v.get("summary"), texts)
+    return texts
+
+
+def _grading_items(p: Path) -> list[dict]:
+    try:
+        data = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return []
+    rows = data.get("rows") if isinstance(data, dict) else data
+    out = []
+    for i, row in enumerate(rows if isinstance(rows, list) else []):
+        if not isinstance(row, dict):
+            continue
+        name = row.get("finding") or row.get("id") or f"row {i + 1}"
+        for t in _grading_texts(row):
+            out.append({"kind": "grading", "ref": f"{p}#{row.get('id') or i + 1}",
+                        "label": f"Grading table: {str(name)[:60]}", "text": t})
+    return out
+
+
+def _file_items(files: dict[str, list[Path]]) -> list[dict]:
+    out = []
+    for p in files["review"]:
+        text = _read(p)
+        body = _FRONT.sub("", text, count=1)
+        if body.strip():
+            out.append({"kind": "review", "ref": str(p), "label": _review_label(p, text), "text": body})
+    for p in files["grading"]:
+        out += _grading_items(p)
+    for kind, label in (("kit", "Writing kit (kit.md)"), ("check", "Check"), ("notes", "Helper chat notes")):
+        for p in files[kind]:
+            text = _read(p)
+            if text.strip():
+                lab = label if kind == "kit" else f"{label} ({p.name})"
+                out.append({"kind": kind, "ref": str(p), "label": lab, "text": _FRONT.sub("", text, count=1)})
+    return out
 
 
 def items(task_dir: Path) -> list[dict]:
@@ -143,9 +331,15 @@ def items(task_dir: Path) -> list[dict]:
     meta = workspace.load(d)
     trans, packs, leads_p = _sources(d, meta)
     docs = _dossier_docs(meta)
-    sig = (_mtime(d / "brief.md"), _mtime(d / "task.json"), _mtime(leads_p),
+    files = _ai_files(d)
+    briefs = _brief_files(docs)
+    plain_p = d / "plain.json"
+    und = _understand_files(d)
+    sig = (tuple((str(p), _mtime(p)) for p in und), _mtime(d / "brief.md"), _mtime(d / "task.json"), _mtime(leads_p),
            tuple((str(p), _mtime(p)) for p in trans), tuple((str(p), _mtime(p)) for p in packs),
-           tuple((i, _mtime(p)) for i, p, _ in docs))
+           tuple((i, _mtime(p)) for i, p, _ in docs),
+           tuple((str(p), _mtime(p)) for ps in files.values() for p in ps),
+           tuple((str(p), _mtime(p)) for _, p in briefs), _mtime(plain_p))
     key = str(d)
     with _LOCK:
         hit = _CACHE.get(key)
@@ -181,6 +375,8 @@ def items(task_dir: Path) -> list[dict]:
         _strings(doc, texts)
         for t in texts:
             out.append({"kind": "lead", "ref": i, "label": "Repo research (dossier)", "text": t})
+    # repo briefs (current and earlier versions) of those dossiers
+    out += _brief_items(briefs)
     # AutoQC justifications
     for q in meta.get("qc") or []:
         for dim in q.get("dims") or []:
@@ -194,14 +390,16 @@ def items(task_dir: Path) -> list[dict]:
             out.append({"kind": "transcript_claude", "ref": str(p), "label": f"Claude in {run or 'the lane'}", "text": t})
         for t in _human_texts(p):
             out.append({"kind": "_human", "ref": str(p), "label": "", "text": t})
-    # the outside review in each review pack
+    # the outside review in each review pack and follow-up pack
     for p in packs:
-        try:
-            m = _REVIEW.search(p.read_text(errors="replace"))
-        except OSError:
-            m = None
-        if m:
+        for m in _REVIEW.finditer(_read(p)):
             out.append({"kind": "audit", "ref": str(p), "label": f"Outside review ({p.parent.name})", "text": m.group(1)})
+    # what the newer features saved: outside reviews, grading rows, the kit, checks, helper-chat facts
+    out += _file_items(files)
+    # the findings in plain words (spec 7.5)
+    out += _plain_items(plain_p)
+    # the task understanding beside the prompt (johto/understand.py)
+    out += _understand_items(und)
     with _LOCK:
         _CACHE[key] = (sig, out)
     return out

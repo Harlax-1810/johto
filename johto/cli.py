@@ -7,6 +7,7 @@ Studio fields, AutoQC, submitting) is automated here.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import re
 import subprocess
@@ -87,25 +88,105 @@ def cmd_slots(a):
         print(f"  ... {len(rows) - a.top} more (use --top)")
 
 
+STATUS_GROUPS = [("Writing (mine)", "mine"), ("Submitted", "submitted"), ("Accepted", "accepted"),
+                 ("Rejected", "rejected")]
+LOCAL_VIEW = {"Writing": "mine", "Awaiting Review": "submitted", "In Review": "submitted", "Accepted": "accepted",
+              "Rejected": "rejected"}
+
+
+def _focus_of(short: str, chats) -> dict | None:
+    """focus.summary for a local task folder, or None (no folder, or the estimate failed)."""
+    from . import focus
+    d = config.TASKS / short
+    if not (d / "task.json").exists():
+        return None
+    try:
+        return focus.summary(d, chats=chats)
+    except Exception:
+        return None
+
+
+def _local_status_tasks() -> dict[str, list[dict]]:
+    """Task folders grouped like Studio's views, from the status task.json cached at the last Studio read."""
+    out: dict[str, list[dict]] = {v: [] for _, v in STATUS_GROUPS}
+    out["dropped"] = []
+    for p in sorted(config.TASKS.glob("*/task.json")):
+        try:
+            meta = workspace.load(p.parent)
+        except (OSError, ValueError):
+            continue
+        st = meta.get("studio") or {}
+        view = "dropped" if meta.get("discard") or meta.get("discarded") or meta.get("unclaimed_at") \
+            else LOCAL_VIEW.get(st.get("status") or "Writing", "mine")
+        out[view].append({"task_name": meta["task_name"], "slot": meta.get("slot") or {},
+                          "repo_url": (meta.get("repo") or {}).get("pinned_url"), "feedback": st.get("feedback"),
+                          "polled_at": st.get("polled_at")})
+    return out
+
+
 def cmd_status(a):
-    me = actions.me()
-    groups = [("Writing (mine)", "mine"), ("Submitted", "submitted"), ("Accepted", "accepted"),
-              ("Rejected", "rejected")]
-    for label, view in groups:
-        ts = S().list_tasks(view=view)
-        if view == "mine":
-            ts = [t for t in ts if t.get("owned_by") == me]
+    from . import focus
+    chats = None
+    try:
+        chats = focus.chat_messages()
+    except Exception:
+        chats = {}
+    if a.local:
+        listed = _local_status_tasks()
+        print("From the task folders (Studio status as of each task's last Studio read; drop --local to ask Studio).")
+    else:
+        me = actions.me()
+        listed = {}
+        for _, view in STATUS_GROUPS:
+            ts = S().list_tasks(view=view)
+            if view == "mine":
+                ts = [t for t in ts if t.get("owned_by") == me]
+            listed[view] = [{"task_name": t["task_name"], "slot": studio.slot_of(t),
+                             "repo_url": (t.get("custom_fields") or {}).get("field_repo_url"),
+                             "feedback": (t.get("custom_fields") or {}).get("field_review_writer_feedback")}
+                            for t in ts]
+    mins: dict[str, list[float]] = {}
+    for label, view in STATUS_GROUPS + ([("Dropped or unclaimed", "dropped")] if listed.get("dropped") else []):
+        ts = listed.get(view) or []
         print(f"\n{label}: {len(ts)}")
         for t in ts:
-            cf = t.get("custom_fields") or {}
-            local = (config.TASKS / workspace.short_name(t["task_name"])).exists()
-            print(f"  {t['task_name']:16} {slots.slot_key(studio.slot_of(t))}"
-                  f"{'  [local]' if local else ''}")
-            print(f"  {'':16} {cf.get('field_repo_url') or '(no repo yet)'}")
-            fb = cf.get("field_review_writer_feedback")
-            if fb:
-                print(textwrap.indent(textwrap.fill("Reviewer: " + fb, 100), " " * 19))
+            short = workspace.short_name(t["task_name"])
+            f = _focus_of(short, chats)
+            you = f"  you {focus.fmt_minutes(f['minutes'])}" if f and f["method"] != "none" else ""
+            if f:
+                mins.setdefault(view, []).append(f["minutes"])
+            print(f"  {t['task_name']:16} {slots.slot_key(t['slot'])}{'  [local]' if f is not None else ''}{you}")
+            print(f"  {'':16} {t.get('repo_url') or '(no repo yet)'}")
+            if t.get("feedback"):
+                print(textwrap.indent(textwrap.fill("Reviewer: " + t["feedback"], 100), " " * 19))
     print()
+    print(focus_totals(mins))
+    print()
+
+
+def focus_totals(mins: dict[str, list[float]]) -> str:
+    """Austin's focused minutes per accepted task: every settled task's minutes (accepted, rejected, dropped)
+    over the accepted ones, so time spent on tasks that didn't make it counts against the ones that did."""
+    from . import focus
+    settled = [m for v in ("accepted", "rejected", "dropped") for m in mins.get(v, [])]
+    n_acc = len(mins.get("accepted", []))
+    open_ = [m for v in ("mine", "submitted") for m in mins.get(v, [])]
+    lines = []
+    if n_acc:
+        lines.append(f"Your focused time per accepted task: {focus.fmt_minutes(sum(settled) / n_acc)} "
+                     f"({focus.fmt_minutes(sum(settled))} over {len(settled)} settled task"
+                     f"{'s' if len(settled) != 1 else ''}, {n_acc} accepted).")
+    elif settled:
+        lines.append(f"No accepted task yet; {focus.fmt_minutes(sum(settled))} on settled tasks.")
+    if open_:
+        lines.append(f"Open tasks so far: {focus.fmt_minutes(sum(open_))} over {len(open_)} "
+                     f"(writing and submitted).")
+    if lines:
+        lines.append("Estimated from your messages, lane prompts, Studio edits and johto commands unless you "
+                     "used `johto focus <task> start|stop`; `johto focus <task>` shows how.")
+    else:
+        lines.append("No focused time recorded in the task folders yet.")
+    return "\n".join(lines)
 
 
 CLAIM_STEP_TEXT = {"claiming": "Claiming in Studio...", "saving_repo": "Saving repo name, pinned URL and language in Studio...",
@@ -179,13 +260,10 @@ def cmd_start(a):
 
 def cmd_lane(a):
     d = task_dir_arg(a.task)
-    if a.stop_others:  # your explicit flag: stops other lanes even with Claude running (files are kept)
-        try:
-            run_dir = lanes.new_lane(d, a.kind, stop_others=True)
-        except RuntimeError as e:
-            raise SystemExit(str(e))
-    else:
-        run_dir = actions.start_lane(d, a.kind, log=print)
+    # --stop-others is your explicit flag: it stops other lanes even with Claude running (files are kept).
+    # A validation lane checks the prompt first (actions.lane_gate): --again, --qc, --skip-qc.
+    run_dir = actions.start_lane(d, a.kind, log=print, again=a.again, qc=a.qc, skip_qc=a.skip_qc,
+                                 stop_others=a.stop_others, need_prompt=True)
     sub = workspace.parse_submission(d)
     prompt = sub["sections"].get("Opening Prompt", "")
     print(f"\nLane ready: {run_dir}")
@@ -219,6 +297,15 @@ def cmd_resume(a):
     if run is None:
         raise SystemExit("No runs yet.")
     run_dir = d / "runs" / (run if isinstance(run, str) else run.name)
+    rec = actions.run_record(d, run_dir.name) or {}
+    if lanes.remote_of(rec):
+        # A lane on another machine (the PC): reattach over ssh. This Mac's lanes don't hold its ports.
+        import os
+        import shlex
+        cmd = actions.resume_command(d, run_dir.name, rec)
+        print(f"{run_dir.name} runs on {rec['host']}: {cmd}")
+        os.execvp("ssh", shlex.split(cmd))
+        return
     me = (lanes.manifest(run_dir).get("lane") or {}).get("container")
     running = lanes.running_lanes()
     slot = lanes.run_slot(actions.run_record(d, run_dir.name))
@@ -260,14 +347,10 @@ def _run_arg(a, d: Path) -> str | None:
 
 
 def cmd_check(a):
-    d = task_dir_arg(a.task)
-    run = _run_arg(a, d)
-    meta = workspace.load(d)
-    problems = actions.check(d, run)
-    vrun, _ = actions.validation_run(d, run)
-    print(f"{d.name}: {meta['task_name']}  {slots.slot_key(meta['slot'])}" + (f"  (run {vrun})" if vrun else ""))
-    print(lint.render(problems))
-    return problems
+    """`johto check`: the saved-draft check (johto/draftcheck.py). It covers the old lint and run checks, reads
+    Studio's saved text, and returns the old (level, field, message) list so `submit` can stop on errors."""
+    from . import draftcheck
+    return draftcheck.cmd_check(a)
 
 
 def cmd_pull(a):
@@ -322,9 +405,7 @@ def cmd_submit(a):
     run, rec = actions.validation_run(d, run)
     if not rec or not rec.get("transcript") or not rec.get("diff"):
         raise SystemExit("Need a collected validation run (transcript and diff) before submitting.")
-    g = meta.get("gists") or {}
-    stale = bool(g.get("run") and g["run"] != run)
-    need = [k for k in ("conversation_log", "final_output") if stale or not g.get(k)]
+    need = actions.gist_state(d, run)["need"]
     print(f"\nValidation run: {run}  ({lanes.diff_stat((rec or {}).get('diff'))})")
     if need:
         print(f"Will upload as secret gists on github.com/{gists.GH_ACCOUNT}: "
@@ -340,6 +421,12 @@ def cmd_submit(a):
     if fails and not a.force:
         raise SystemExit(f"\nAutoQC failed {fails} checks. Fix the text and rerun `johto submit {short}`, "
                          "or resolve them in Studio. Submit needs AutoQC failures resolved.")
+    ts = actions.trajectory_state(d, run)
+    if ts["status"] == "uploaded":
+        print(f"Trajectory Logs: {run}'s transcript is in Studio.")
+    else:
+        print(f"\nTrajectory Logs: {actions.trajectory_row(d, run)['detail']}\n"
+              "Upload it now if you haven't; submitting reads Studio again first.")
     if not confirm(f"\nSubmit {meta['task_name']} for review? This can't be undone from the writer side.", a.yes_submit):
         print(f"Saved but not submitted. Review it at {studio.task_url(meta['task_id'])}")
         return
@@ -394,7 +481,9 @@ def cmd_clean(a):
 def cmd_pack(a):
     from . import pack
     d = task_dir_arg(a.task)
-    out = pack.build(d, a.run, max_tokens=a.max_tokens, ai=not a.no_ai)
+    from . import settings
+    ai = False if a.no_ai else (True if a.ai else bool(settings.get("pack_outside_review")))
+    out = pack.build(d, a.run, max_tokens=a.max_tokens, ai=ai)
     if a.copy:
         subprocess.run(["pbcopy"], input=out.read_text(), text=True)
         print("Copied to the clipboard.")
@@ -405,6 +494,37 @@ def cmd_open(a):
     d = task_dir_arg(a.task)
     meta = workspace.load(d)
     print(studio.task_url(meta["task_id"]))
+
+
+# Modules that add their own commands with register(sub). One that doesn't exist yet is skipped.
+MODULES = ("budget", "reviews", "turnwatch", "rules", "where", "kit", "grading", "verify", "coverage", "deck", "focus",
+           "slot_options", "understand", "feedback")
+
+
+def register_modules(sub, names=MODULES) -> list[str]:
+    """Import johto.<name> for each name and call its register(sub). Only a missing module is skipped; an
+    error inside one stops the CLI, so it gets fixed. A command name already taken is reported and skipped."""
+    done = []
+    for name in names:
+        full = f"{__package__ or 'johto'}.{name}"
+        try:
+            mod = importlib.import_module(full)
+        except ModuleNotFoundError as e:
+            if e.name == full:
+                continue
+            raise
+        reg = getattr(mod, "register", None)
+        if reg is None:
+            continue
+        try:
+            reg(sub)
+        except ValueError as e:   # argparse: conflicting subparser
+            if "conflicting subparser" not in str(e):
+                raise
+            print(f"johto: {name} wants a command name that is already taken ({e}); skipped it.", file=sys.stderr)
+            continue
+        done.append(name)
+    return done
 
 
 def main(argv=None):
@@ -421,7 +541,9 @@ def main(argv=None):
     s.add_argument("--refresh", action="store_true")
     s.set_defaults(func=cmd_slots)
 
-    s = sub.add_parser("status", help="your tasks in Studio, with reviewer feedback")
+    s = sub.add_parser("status", help="your tasks in Studio, with reviewer feedback and your focused minutes")
+    s.add_argument("--local", action="store_true",
+                   help="read the task folders' cached Studio status instead of asking Studio")
     s.set_defaults(func=cmd_status)
 
     s = sub.add_parser("start", help="claim a slot for a lead or repo; make the task folder")
@@ -443,6 +565,13 @@ def main(argv=None):
     s.add_argument("--stop-others", action="store_true",
                    help="stop every other running lane first (otherwise a second lane starts beside one running lane)")
     s.add_argument("--no-go", action="store_true", help="set up only; don't start Claude")
+    s.add_argument("--again", action="store_true",
+                   help="validate: start a new run even though an earlier one used the same prompt")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--qc", action="store_true",
+                   help="validate: bring Studio's edits in, save the prompt if only yours changed, run AutoQC, "
+                        "then set up the lane if the prompt passes")
+    g.add_argument("--skip-qc", action="store_true", help="validate: start without the prompt AutoQC check")
     s.set_defaults(func=cmd_lane)
 
     s = sub.add_parser("resume", help="re-enter a lane's Claude session")
@@ -455,9 +584,12 @@ def main(argv=None):
     s.add_argument("run", nargs="?", help="e.g. calib-1 (default: latest validate, else calib)")
     s.set_defaults(func=cmd_collect)
 
-    s = sub.add_parser("check", help="lint submission.md and the validation run")
+    from . import draftcheck
+    s = sub.add_parser("check", help="check the saved draft: Studio's text, uploads, minutes, the run, lint; "
+                                     "--deep adds AI flags")
     s.add_argument("task")
     s.add_argument("--run", help="the run to submit (default: the chosen run, else latest validate-N), e.g. calib-1")
+    draftcheck.add_check_args(s)
     s.set_defaults(func=cmd_check)
 
     s = sub.add_parser("pull", help="bring fields you edited in Studio into submission.md")
@@ -504,7 +636,10 @@ def main(argv=None):
     s.add_argument("task")
     s.add_argument("run", nargs="?", help="e.g. calib-1 (default: most recent; works mid-run)")
     s.add_argument("--max-tokens", type=int, default=200_000)
-    s.add_argument("--no-ai", action="store_true", help="skip the outside Claude review")
+    g = s.add_mutually_exclusive_group()
+    g.add_argument("--ai", action="store_true",
+                   help="add the outside Claude review (default: settings pack_outside_review, off)")
+    g.add_argument("--no-ai", action="store_true", help="skip the outside Claude review")
     s.add_argument("--copy", action="store_true", help="copy the pack to the clipboard")
     s.set_defaults(func=cmd_pack)
 
@@ -526,7 +661,16 @@ def main(argv=None):
         from .dossier import cli as dossier_cli; dossier_cli.register(sub)  # noqa: E702  (dossier engine)
     except ImportError:
         pass
+    register_modules(sub)
+    s = sub.add_parser("grading-plain", help="write the grading table's findings in plain words "
+                                              "(also `johto grading plain <task>`)")
+    s.add_argument("task")
+    s.add_argument("--force", action="store_true", help="write every row again, not only the missing ones")
+    s.set_defaults(func=lambda a: __import__("johto.plain", fromlist=["cmd_plain"]).cmd_plain(a))
 
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:2] == ["grading", "plain"]:   # `johto grading plain <task>` (johto/plain.py)
+        argv = ["grading-plain", *argv[2:]]
     a = p.parse_args(argv)
     try:
         a.func(a)

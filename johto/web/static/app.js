@@ -8,14 +8,14 @@ import { registerChord, registerSequence, pushContext, zone } from "./lib/keys.j
 import { api } from "./lib/api.js";
 import { act } from "./lib/actions.js";
 import "./lib/studio_sync.js";
-import { TopBar } from "./components/topbar.js";
+import { Shell } from "./components/shell.js";
 import { LaneDrawer, runDrawerPrimary, focusTerminal } from "./components/drawer.js";
 import { Palette, KeyOverlay, Toasts, registerPalette } from "./components/overlays.js";
-import Home from "./screens/home.js";
-import Repos from "./screens/repos.js";
-import Scout from "./screens/scout.js";
+// Each route's entry module is owned by one builder (spec.md 2.2 and 10). This file is frozen (lead).
+import Now, { opensLane } from "./screens/now.js";
+import Discover from "./screens/discover/index.js";
+import Workbench from "./screens/workbench/index.js";
 import Finished from "./screens/finished.js";
-import TaskPage from "./screens/task.js";
 
 // The open surface registers its primary action here; ⌘⇧↵ runs it.
 let primary = null;
@@ -23,13 +23,18 @@ export function setPrimaryHandler(fn) { primary = fn; }
 
 const inDrawer = () => !!document.activeElement?.closest?.(".drawer");
 
+// ⌘↵ does the top queue item. The Now screen may replace what that means (spec.md 3.1) with setNextHandler.
+let nextHandler = null;
+export function setNextHandler(fn) { nextHandler = fn; }
+
 function doNext() {
   if (Date.now() - nextChangedAt.value < 800) return;
+  if (nextHandler) { nextHandler(queue.value[0] || null); return; }
   const n = queue.value[0];
   if (!n) return;
   if (route.value !== "/") navigate("/");
   select(n.id);
-  if (n.lane || n.surface === "lane") { openDrawer("row"); setTimeout(() => focusTerminal(), 160); }
+  if (opensLane(n)) { openDrawer("row"); setTimeout(() => focusTerminal(), 160); }   // not for PC runs or a run not started
   else if (drawer.value.open && inDrawer()) closeDrawer();
 }
 
@@ -62,7 +67,7 @@ registerChord("alt+n", () => { openDrawer("user"); setTimeout(() => document.que
 registerSequence("g h", () => navigate("/"));
 registerSequence("g p", () => navigate("/repos"));
 registerSequence("g r", () => navigate("/repos"));
-registerSequence("g s", () => navigate("/scout"));
+registerSequence("g s", () => navigate("/repos", "#slots"));
 registerSequence("g f", () => navigate("/finished"));
 
 // ⌘Z outside text fields undoes the newest undo window (claims, hides). Inside a field it stays the
@@ -86,8 +91,15 @@ pushContext("global", {
   Escape: () => { palette.value = false; overlay.value = false; },
 });
 
+/** The queue items Now can show: no pick rows, no running rows, and no calibration "keep or drop" unless
+ * calibration is on (Austin's order skips it). j/k and the palette's queue rows walk only these. */
+function nowItems() {
+  const calib = !!app.value?.settings?.calibrate_first;
+  return queue.value.filter((x) => x.kind !== "pick" && (x.group ?? "queue") === "queue" && (calib || x.kind !== "decide"));
+}
+
 function moveSel(d) {
-  const q = queue.value; if (!q.length) return;
+  const q = nowItems(); if (!q.length) return;
   const i = Math.max(0, q.findIndex((x) => x.id === selected.value?.id));
   select(q[Math.min(q.length - 1, Math.max(0, i + d))].id);
 }
@@ -116,22 +128,19 @@ function taskCommands() {
   if (!short) return [];
   const s = (app.value?.tasks || []).find((t) => t.short === short);
   const label = s?.label || it.label;
-  const name = s?.task_name || short;
   const out = [
     { id: "t-page", group: "Task", label: `Task page for ${label}`, key: "t", run: () => navigate(`/task/${short}`) },
     { id: "t-save", group: "Studio", label: `Save to Studio: ${label}`, run: () => act(`/api/tasks/${short}/studio/save`, {}, { what: "Saving to Studio" }) },
-    { id: "t-qc", group: "Studio", label: `Rerun AutoQC: ${label}`, run: () => act(`/api/tasks/${short}/studio/qc`, { spec: "AutoQC" }, { what: "AutoQC started" }) },
+    { id: "t-qc", group: "Studio", label: `Rerun Mercor's automatic checks: ${label}`, run: () => act(`/api/tasks/${short}/studio/qc`, { spec: "AutoQC" }, { what: "AutoQC started" }) },
     { id: "t-refresh", group: "Studio", label: `Refresh from Studio: ${label}`, run: () => act(`/api/tasks/${short}/studio/refresh`, {}, { what: "Refreshing from Studio" }) },
-    twoPress("t-unclaim", "Studio", `Unclaim ${name} in Studio`, "POST", `/api/tasks/${short}/studio/unclaim`, {}, "Unclaiming"),
+    twoPress("t-unclaim", "Studio", `Unclaim ${label} in Studio`, "POST", `/api/tasks/${short}/studio/unclaim`, {}, "Unclaiming"),
     { id: "t-clean", group: "Lane", label: `Clean lanes for ${label}`, run: () => act(`/api/tasks/${short}/clean`, {}, { what: "Removing lanes" }) },
   ];
-  if (s?.studio?.url) out.push({ id: "t-studio", group: "Studio", label: `Open ${name} in Studio`, key: "o", run: () => window.open(s.studio.url, "_blank", "noopener") });
+  if (s?.studio?.url) out.push({ id: "t-studio", group: "Studio", label: `Open ${label} in Studio`, key: "o", run: () => window.open(s.studio.url, "_blank", "noopener") });
   if (it.kind === "write_prompt") {
-    // The palette follows settings.calibrate_first, like the prompt's own buttons.
+    // Calibration shows up only when settings.calibrate_first is on (Austin skips it), like the prompt's buttons.
     if (app.value?.settings?.calibrate_first) {
       out.push({ id: "t-skip", group: "Task", label: `Skip calibration for ${label}`, run: () => act(`/api/tasks/${short}/skip-calibration`, {}, { what: "Skipped calibration" }) });
-    } else {
-      out.push({ id: "t-calib", group: "Task", label: `Calibrate first: ${label}`, run: () => act(`/api/tasks/${short}/done`, { surface: "prompt", kind: "calib" }, { what: "Queued calibration" }) });
     }
   }
   return out;
@@ -141,10 +150,9 @@ registerPalette(() => {
   const l = lane.value;
   const s = app.value?.settings || {};
   return [
-    { id: "nav-home", group: "Go", label: "Home", key: "g h", run: () => navigate("/") },
-    { id: "nav-repos", group: "Go", label: "Repos", key: "g p", run: () => navigate("/repos") },
-    { id: "nav-scout", group: "Go", label: "Scout", key: "g s", run: () => navigate("/scout") },
-    { id: "nav-fin", group: "Go", label: "Finished", key: "g f", run: () => navigate("/finished") },
+    { id: "nav-home", group: "Go", label: "Now", key: "g h", run: () => navigate("/") },
+    { id: "nav-repos", group: "Go", label: "Find work", key: "g p", run: () => navigate("/repos") },
+    { id: "nav-fin", group: "Go", label: "Submitted", key: "g f", run: () => navigate("/finished") },
     { id: "lane", group: "Lane", label: "Open the lane", key: "⌃`", run: () => openDrawer("user") },
     { id: "ghostty", group: "Lane", label: "Open lane in Ghostty", enabled: !!l.run, why: "no lane is running",
       run: () => act("/api/lane/ghostty", {}, { quiet: true }) },
@@ -161,28 +169,32 @@ registerPalette(() => {
     ...taskCommands(),
     { id: "demo", group: "View", label: app.value?.server?.mode === "demo" ? "Show my real tasks" : "Show the demo afternoon",
       run: () => { location.href = `/?demo=${app.value?.server?.mode === "demo" ? 0 : 1}`; } },
-    ...queue.value.map((q) => ({ id: `q-${q.id}`, group: "Queue", label: `${q.title} · ${q.label}`, run: () => { navigate("/"); select(q.id); } })),
+    ...nowItems().map((q) => ({ id: `q-${q.id}`, group: "Queue", label: `${q.title} · ${q.label}`, run: () => { navigate("/"); select(q.id); } })),
   ];
 });
+
+function Screen({ r }) {
+  if (r === "/") return html`<${Now} />`;
+  if (r.startsWith("/repos") || r.startsWith("/pick")) return html`<${Discover} id=${r.split("/")[2] || null} />`;
+  if (r.startsWith("/scout")) return html`<${Discover} scout=${true} />`;
+  if (r.startsWith("/finished")) return html`<div class="frame"><${Finished} /></div>`;
+  if (r.startsWith("/task/")) return html`<${Workbench} short=${r.split("/")[2]} />`;
+  return html`<${Now} />`;
+}
 
 function App() {
   const r = route.value;
   if (!app.value) return html`<div></div>`;
-  let screen;
-  if (r === "/") screen = html`<${Home} />`;
-  else if (r.startsWith("/repos") || r.startsWith("/pick")) screen = html`<div class="frame"><${Repos} id=${r.split("/")[2] || null} /></div>`;
-  else if (r.startsWith("/scout")) screen = html`<div class="frame"><${Scout} /></div>`;
-  else if (r.startsWith("/finished")) screen = html`<div class="frame"><${Finished} /></div>`;
-  else if (r.startsWith("/task/")) screen = html`<div class="frame"><${TaskPage} short=${r.split("/")[2]} /></div>`;
-  else screen = html`<${Home} />`;
-  return html`<${TopBar} />
-    <div class="frame" style="flex-direction:column">${screen}<${LaneDrawer} /></div>
+  return html`<${Shell}>
+      <${Screen} r=${r} />
+      <${LaneDrawer} />
+    <//>
     <${Palette} /><${KeyOverlay} /><${Toasts} />`;
 }
 
 async function boot() {
   try { await refresh(); } catch (e) {
-    document.getElementById("app").textContent = e.status === 401 ? "Open the link `johto web` printed." : e.message;
+    document.getElementById("app").textContent = e.status === 401 ? "This tab can't reach Johto. Open Johto again from its usual link." : e.message;
     return;
   }
   render(html`<${App} />`, document.getElementById("app"));

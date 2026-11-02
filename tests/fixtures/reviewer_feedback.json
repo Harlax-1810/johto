@@ -1,0 +1,10 @@
+{
+  "t4sk0001": {
+    "feedback": "Hello, thanks for sending this. Accepted:\n\n* The trap holds up: a filter runs after the rows are counted, so later batches come up short.\n* Your overview says where the hard part sits.\n* A reviewer can mark the goal pass or fail.\n* The opening prompt suits the seeded casual style.\n\nOne small thing to improve is the goal. \n\n* The goal should state the row limit. It says every row must ship, but the 500-row cutoff appears only in the difficulty rationale. With it in the goal, the criterion stands alone.",
+    "feedback_at": "2026-03-10T09:00:36-0700"
+  },
+  "t4sk0003": {
+    "feedback": "Hello, thanks for sending this. Accepted :\n\n* All three risks exist at the pinned commit.\n* The renaming risk is correct: nothing clears the old cache key.\n* The prompt is short and casual and doesn't lead the model.\n\n**What to fix next time:**\n\n* The validation notes are cut off mid-word at the end (\"when I ship the second half it fo\"), please check what the form saved before you submit.",
+    "feedback_at": "2026-03-10T09:00:37-0700"
+  }
+}

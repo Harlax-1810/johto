@@ -83,10 +83,10 @@ the repo root at the pinned commit; the app shows the real code for them, so blo
 ```json
 {"type": "opportunity", "id": "o1",
  "title": "≤ 10 words, a label not a sentence",
- "area": "≤ 4 words, e.g. 'group state consistency'",
+ "area": "≤ 4 words, e.g. 'room state consistency'",
  "ambition": "≤ 45 words: what a funded expert team would build or fix here",
  "why_not_done": "≤ 25 words: why the maintainers haven't (size, risk, expertise)",
- "evidence": [{"pointer": "room/room.go:573-640", "fact": "≤ 22 words, what the code does now"}],
+ "evidence": [{"pointer": "room/room.go:120-180", "fact": "≤ 22 words, what the code does now"}],
  "where_models_fail": ["≤ 25 words each: a concrete trap, wrong-but-plausible fix, or missed interaction"],
  "bounded_task": {
    "exists": true,
@@ -105,7 +105,7 @@ Rules for every text field:
 - Facts, labels and short clauses. No paragraphs beyond the limits, no marketing words, no em dashes.
 - Never written as an instruction to a model or a person ("Add X", "Please"), never as a ticket, user
   story, acceptance criteria, goal statement, or better/worse comparison. `ambition` and `shape` describe
-  the work in the third person ("Lock state survives group reload and expiry").
+  the work in the third person ("Limits survive a room reload and expiry").
 - `where_models_fail` describes traps in the code, not grading criteria.
 
 Validation (`johto/dossier/schema.py`): types, enums, word limits, pointer format, that every pointer's
@@ -156,9 +156,9 @@ SCHEMA_REVISIONS = [
     ('"check_in_session": "≤ 30 words: how a reviewer can verify it within one session (tests, run, compare)"',
      '"check_in_session": "≤ 30 words: what a reviewer can observe in one session: the reproduction recipe '
      'with concrete data, the existing test files or commands, the run to compare; not assertions to write"'),
-    ('`ambition` and `shape` describe\n  the work in the third person ("Lock state survives group reload and expiry").',
-     '`ambition` and `shape` state\n  what is missing or broken now, in the third person ("Lock state is lost on '
-     'group reload and expiry").'),
+    ('`ambition` and `shape` describe\n  the work in the third person ("Limits survive a room reload and expiry").',
+     '`ambition` and `shape` state\n  what is missing or broken now, in the third person ("Limits are lost on '
+     'room reload and expiry").'),
     ("- `where_models_fail` describes traps in the code, not grading criteria.",
      "- `where_models_fail` names hazards in the code, never a fix, an approach or grading criteria."),
     ("| `questions` | `items` [str ≤ 25 words] (≤ 6) |",

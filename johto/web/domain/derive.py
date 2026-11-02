@@ -50,6 +50,45 @@ def after(a, b) -> bool:
     return tb is None or ta > tb
 
 
+CLAIM_SLACK_S = 3600  # feedback first seen this long after the claim is a review of Austin's work
+
+
+def _fb_hash(v) -> str:
+    """sync.h, the hash the claim recorded ("" for no text)."""
+    from ... import sync
+    return sync.h(v) if sync.norm(v) else ""
+
+
+def sent_back_since(meta: dict) -> str | None:
+    """When the reviewer sent the task back to Austin ("" when the time is unknown), or None.
+
+    A task in Writing whose reviewer feedback is on Austin's work counts, whether he submitted from the app
+    or in Studio. The feedback is his when any of these hold: Studio moved the task from review back to
+    Writing while the app watched (studio.sent_back_at); he submitted (app or Studio's counter); the
+    feedback differs from what Studio held at his claim (feedback_at_claim); Studio held nothing at the
+    claim (an empty studio_at_claim); or, for tasks claimed before those records, the app first saw the
+    feedback more than an hour after the claim. Not when he resubmitted after it came back."""
+    st = meta.get("studio") or {}
+    fb = st.get("feedback")
+    if st.get("status") != "Writing" or not str(fb or "").strip():
+        return None
+    since = st.get("sent_back_at") or st.get("feedback_at") or st.get("polled_at") or ""
+    sub_at = meta.get("submitted_at") or st.get("submitted_at")
+    if sub_at and since and after(sub_at, since):
+        return None
+    if st.get("sent_back_at") or sub_at or (st.get("times_submitted") or 0) > 0:
+        return since
+    if "feedback_at_claim" in meta:
+        return since if _fb_hash(fb) != (meta.get("feedback_at_claim") or "") else None
+    at_claim = meta.get("studio_at_claim")
+    if isinstance(at_claim, dict) and not at_claim:
+        return since
+    claimed, seen = ts(meta.get("claimed_at")), ts(st.get("feedback_at"))
+    if claimed is not None and seen is not None and seen > claimed + CLAIM_SLACK_S:
+        return since
+    return None
+
+
 def _job(jobs: list[dict], short: str, *kinds: str) -> dict | None:
     for j in jobs or []:
         if j.get("state") in ACTIVE_JOB and j.get("kind") in kinds and _job_short(j) == short:
@@ -81,12 +120,22 @@ def runs_of(t: dict, kind: str | None = None) -> list[dict]:
 
 
 def used(r: dict) -> bool:
-    """A run counts once Claude started in it or it is still live; a lane set up and never used doesn't."""
-    return bool(r.get("collected_at") or r.get("has_transcript") or r.get("live") or r.get("container_up"))
+    """A run counts once Claude started in it or it is still live; a lane set up and never used doesn't.
+    `remote_live`: the run monitor sees its lane running on the PC (no local transcript or container)."""
+    return bool(r.get("collected_at") or r.get("has_transcript") or r.get("live") or r.get("container_up")
+                or r.get("remote_live"))
 
 
 def submission_run(t: dict) -> dict | None:
+    """The run the submission uses. `t["submission_run"]`, when the caller resolved it (data.py, by
+    actions.submission_run, the one shared rule), wins. Without one: the chosen or submitted run, else the newest
+    validation run Claude started in, so the checklist can say it isn't collected yet."""
     meta = t["meta"]
+    resolved = t.get("submission_run")
+    if resolved:
+        r = next((r for r in t.get("runs") or [] if r["name"] == resolved), None)
+        if r:
+            return r
     want = meta.get("submission_run") or (meta.get("submission") or {}).get("run")
     if want:
         r = next((r for r in t.get("runs") or [] if r["name"] == want), None)
@@ -139,13 +188,11 @@ def _stage(t: dict) -> dict:
     if status == "Rejected":
         return _out("rejected", since=st.get("polled_at"), feedback=st.get("feedback"))
     if status in ("Awaiting Review", "In Review"):
-        return _out("in_review", since=meta.get("submitted_at") or st.get("polled_at"))
-    submitted = meta.get("submitted_at") or st.get("submitted_at") or (st.get("times_submitted") or 0) > 0
-    if status == "Writing" and st.get("feedback") and submitted:
-        fb_at = st.get("feedback_at") or st.get("polled_at")
-        sub_at = meta.get("submitted_at") or st.get("submitted_at")
-        if not (fb_at and sub_at and after(sub_at, fb_at)):
-            return _out("sent_back", since=fb_at, feedback=st.get("feedback"))
+        # Without submitted_at the time is Studio's last poll, not the submit time ("checked").
+        return _out("in_review", since=meta.get("submitted_at") or st.get("polled_at"), checked=not meta.get("submitted_at"))
+    back = sent_back_since(meta)
+    if back is not None:
+        return _out("sent_back", since=back or None, feedback=st.get("feedback"))
     if not status and meta.get("submitted_at"):
         return _out("in_review", since=meta["submitted_at"])
     # 4. Claim or submit running.
@@ -162,7 +209,7 @@ def _stage(t: dict) -> dict:
         if lane["state"] in ("exited", "collecting"):
             return _out("collecting", run=lr.get("run"), since=lane.get("since"))
         return _out("validating" if kind == "validate" else "calibrating", run=lr.get("run"), since=lane.get("since"))
-    live = [r for r in t.get("runs") or [] if r.get("live")]
+    live = [r for r in t.get("runs") or [] if r.get("live") or r.get("remote_live")]
     if live:
         r = live[-1]
         return _out("validating" if r["kind"] == "validate" else "calibrating", run=r["name"], since=r.get("created_at"))

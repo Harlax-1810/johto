@@ -1,0 +1,8 @@
+{
+  "at": "2026-03-10T09:00:37-0700",
+  "fields": {
+    "field_opening_prompt": "Can you walk me through how the import job handles a file that fails halfway?",
+    "field_high_level_goal": "The explanation names each place a partial import can leave rows behind, and says which of them a retry repairs.",
+    "field_self_check": "Claude found the retry path and the cleanup step, and it was right about both. It missed the case where the second attempt runs while the first still holds its lock.\n\nI checked this against the source and the test suite before I marked it."
+  }
+}

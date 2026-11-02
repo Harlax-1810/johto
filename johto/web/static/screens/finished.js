@@ -1,164 +1,102 @@
+// Submitted (spec.md 3.6): what happened to what I sent? One lede with the counts that matter, then one row per
+// submitted task, newest first: its state in its colour, the date, and the reviewer's improvement sentence (human
+// words from Studio, so no AI mark). The week's figures sit behind "Numbers".
 import { useEffect, useState } from "preact/hooks";
 import { html } from "../lib/html.js";
 import { api } from "../lib/api.js";
-import { app, queue, navigate, select } from "../lib/store.js";
-import { mins, plural, cutWords } from "../lib/format.js";
+import { app, navigate } from "../lib/store.js";
 import { pushContext } from "../lib/keys.js";
-import { Kbd, Chip } from "../components/ui.js";
+import { Stage, Lede, Pill, Sheet, Empty, Btn } from "../components/primitives.js";
 
-const STATUS_TONE = {
-  Accepted: "green", "In review": "neutral", "Awaiting Review": "neutral", "Sent back": "amber",
-  Rejected: "red", Dropped: "ghost", Discarded: "ghost", Unclaimed: "ghost",
-};
-const WORDS = ["likely", "possible", "unlikely", "not_checked"];
-const WORD = { likely: "likely", possible: "possible", unlikely: "unlikely", not_checked: "not checked" };
-const SOURCE = { lead_estimate: "Lead scout said", difficulty_check: "Difficulty check said" };
-const SOURCE_SHORT = { lead_estimate: "the lead scout", difficulty_check: "the difficulty check" };
+export const LESSON_WORDS = { accepted: "Accepted", sent_back: "Sent back", rejected: "Rejected", in_review: "In review", dropped: "Dropped" };
+export const LESSON_TONE = { accepted: "ok", sent_back: "wait", rejected: "stop", in_review: "neutral", dropped: "outline" };
 
-function runWords(runs) {
-  const c = (runs || []).filter((r) => r.startsWith("c")).length;
-  const v = (runs || []).filter((r) => r.startsWith("v")).length;
-  return [c ? plural(c, "calibration") : "", v ? plural(v, "validation") : ""].filter(Boolean).join(" · ");
+/** The reviewer's own words, kept as written: paragraphs, bullet lines and bold headings. */
+export function ReviewText({ text }) {
+  const paras = String(text || "").split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+  return html`<div class="su-review">${paras.map((p) => {
+    const lines = p.split("\n").map((l) => l.trim()).filter(Boolean);
+    if (lines.every((l) => /^[*•-]\s+/.test(l))) {
+      return html`<ul>${lines.map((l) => html`<li>${l.replace(/^[*•-]\s+/, "").replace(/\*\*/g, "")}</li>`)}</ul>`;
+    }
+    const bold = /^\*\*(.+)\*\*:?$/.exec(p);
+    if (bold) return html`<h3>${bold[1].replace(/:$/, "")}</h3>`;
+    return html`<p>${p.replace(/\*\*/g, "")}</p>`;
+  })}</div>`;
 }
 
-function droppedWhy(w) {
-  const r = Object.entries(w.dropped_reasons || {});
-  if (!w.dropped || !r.length) return "";
-  if (r.length === 1 && r[0][1] === w.dropped) {
-    return ` (${w.dropped === 1 ? "" : w.dropped === 2 ? "both " : "all "}${r[0][0]})`;
-  }
-  return ` (${r.map(([k, n]) => `${n} ${k}`).join(", ")})`;
-}
+const pct = (n) => (n == null ? null : `${n}%`);
 
-/** Week figures from the server; without them, the counts from the rows. */
-function weekOf(d) {
-  if (d.week) return d.week;
-  const n = (s) => (d.rows || []).filter((r) => r.status === s).length;
-  return { accepted: n("Accepted"), in_review: n("In review"), sent_back: n("Sent back"), dropped: n("Dropped"),
-    dropped_reasons: {}, hours_per_accepted: null, lane_busy_pct: null, claude_waited_min: null };
-}
-
-// A count with something in it takes its status fill, so the week line matches the table below.
-function Count({ n, tone, children }) {
-  return n ? html`<${Chip} tone=${tone}><b>${n}</b> ${children}<//>` : html`<span class="faint">0 ${children}</span>`;
-}
-
-function Week({ w }) {
-  const bits = [
-    html`<${Count} n=${w.sent_back} tone="amber">sent back<//>`,
-    html`<${Count} n=${w.in_review} tone="neutral">in review<//>`,
-    html`<${Count} n=${w.accepted} tone="green">accepted<//>`,
-    html`<${Count} n=${w.dropped} tone="ghost">dropped${droppedWhy(w)}<//>`,
-  ];
-  if (w.hours_per_accepted != null) bits.push(html`<span><b>${w.hours_per_accepted} h</b> per accepted task</span>`);
-  if (w.lane_busy_pct != null) bits.push(html`<span>lane busy <b>${w.lane_busy_pct}%</b> of the time</span>`);
-  if (w.claude_waited_min != null) bits.push(html`<span>Claude waited <b>${w.claude_waited_min} min</b> on you</span>`);
-  return html`<div class="fn-kv fn-week">
-    <span class="label">This week</span>
-    <span class="fn-figs num">${bits.map((b, i) => html`${i ? html`<span class="sep">·</span>` : null}${b}`)}</span>
-  </div>`;
-}
-
-function Ledger({ ledger }) {
-  const by = {};
-  for (const l of ledger || []) (by[l.source] ||= {})[l.word] = l;
-  const sources = Object.keys(by);
-  if (!sources.length) return null;
-  return html`<div class="fn-kv">
-    <span class="label" title="How often calibration was one-shot for each estimate">Estimates vs outcomes</span>
-    <div class="fn-ledger">
-      ${sources.map((s) => html`<div class="fn-lrow">
-        <span class="fn-src">${SOURCE[s] || s}</span>
-        ${WORDS.filter((w) => by[s][w]).map((w) => {
-          const l = by[s][w];
-          const pct = l.n ? Math.round((l.one_shot / l.n) * 100) : 0;
-          return html`<span class="fn-est" title=${`${SOURCE_SHORT[s] || s} said ${WORD[w]}: ${l.one_shot} of ${l.n} calibrations were one-shot`}>
-            <span class="fn-w">${WORD[w]}</span><span class="faint">→</span>
-            <span class="num"><b>${l.one_shot}</b> of ${l.n} one-shot</span>
-            <span class="fn-bar" aria-hidden="true"><i style=${`width:${pct}%`}></i></span>
-          </span>`;
-        })}
-      </div>`)}
-    </div>
-  </div>`;
+/** The week's figures and the estimate ledger: one click down, never on the first layer. The counts the lede
+ * already says are not repeated. */
+function Numbers({ d }) {
+  if (!d) return html`<p class="su-faint">Loading…</p>`;
+  const w = d.week || {};
+  const keep = (rows) => rows.filter((r) => r && r[1] != null && r[1] !== "");
+  const groups = [
+    ["Time", keep([["Hours per accepted task", w.hours_per_accepted], ["Lane busy", pct(w.lane_busy_pct)],
+      ["Claude waited on you", w.claude_waited_min != null ? `${w.claude_waited_min} min` : null], ["Dropped", w.dropped || null]])],
+    ["AI spend", keep(d.spend ? [["This week", `$${d.spend.week_usd.toFixed(2)}`], ["Per submitted task", `$${d.spend.per_submitted_usd.toFixed(2)}`]] : [])],
+    ["Estimates and outcomes", keep((d.ledger || []).map((l) => [
+      `${l.source === "difficulty_check" ? "Difficulty check" : "Repo research"} said ${(l.word || "").replace("_", " ")}`,
+      `${l.one_shot} of ${l.n} one-shot`]))],
+  ].filter(([, rows]) => rows.length);
+  if (!groups.length) return html`<div class="su-nums"><p class="su-faint">No figures yet this week.</p></div>`;
+  return html`<div class="su-nums">${groups.map(([title, rows]) => html`<section>
+    <h3>${title}</h3>
+    <dl class="su-dl">${rows.map(([k, v]) => html`<dt>${k}</dt><dd class="num">${v}</dd>`)}</dl>
+  </section>`)}</div>`;
 }
 
 export default function Finished() {
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
-  const [open, setOpen] = useState(null);     // short whose reviewer feedback is open
-  const [at, setAt] = useState(-1);           // keyboard row
+  const [nums, setNums] = useState(null);
+  const [showNums, setShowNums] = useState(false);
+  const [open, setOpen] = useState(null);
+  const [at, setAt] = useState(-1);
   const mode = app.value?.server?.mode;
-  useEffect(() => { setD(null); }, [mode]);
-  // Read again when any task changes stage (a submit, a review result, a drop arrives over SSE).
   const stages = (app.value?.tasks || []).map((t) => `${t.short}:${t.stage}:${t.studio?.status || ""}`).join(",");
-  useEffect(() => { api.get("/api/finished").then(setD).catch((e) => setErr(e.message)); }, [mode, stages]);
+  useEffect(() => { api.get("/api/now/submitted").then((r) => { setD(r); setErr(null); }).catch((e) => setErr(e.message)); }, [mode, stages]);
+  useEffect(() => { if (showNums) api.get("/api/finished").then(setNums).catch(() => setNums({})); }, [showNums, mode]);
 
-  // Sent-back tasks need you, so they come first; the rest keep the server's order.
-  const rows = [...(d?.rows || [])].sort((a, b) => (b.status === "Sent back") - (a.status === "Sent back"));
+  const rows = d?.rows || [];
   const known = new Set((app.value?.tasks || []).map((t) => t.short));
   const openTask = (r) => known.has(r.short) && navigate(`/task/${r.short}`);
   useEffect(() => pushContext("finished", {
     ArrowDown: () => setAt((i) => Math.min(rows.length - 1, i + 1)),
     ArrowUp: () => setAt((i) => Math.max(0, i - 1)),
+    j: () => setAt((i) => Math.min(rows.length - 1, i + 1)),
+    k: () => setAt((i) => Math.max(0, i - 1)),
     Enter: () => rows[at] && openTask(rows[at]),
-    ArrowRight: () => rows[at]?.feedback && setOpen(rows[at].short),
-    ArrowLeft: () => setOpen(null),
   }), [rows.length, at, known.size]);
 
-  if (err) return html`<div class="pg"><div class="pg-err">${err}</div></div>`;
-  if (!d) return html`<div class="pg"></div>`;
-  const fixRow = (short) => queue.value.find((i) => i.short === short && i.kind === "feedback");
-
-  const hasLedger = (d.ledger || []).length > 0;
-  return html`<div class="pg fn">
-    <section class="pg-panel fn-sum"><${Week} w=${weekOf(d)} /></section>
-
-    ${rows.length ? html`<section class="pg-panel fn-tasks">
-      <header class="pg-ph">
-        <span class="label">Tasks</span>
-        <span class="pg-sub num">${rows.length}</span>
-        <span class="pg-right faint sm"><${Kbd} k="↑↓" /> select <${Kbd} k="↵" /> open <${Kbd} k="→" /> feedback</span>
-      </header>
-      <div class="fn-thead">
-        <span>Task</span><span>Slot</span><span>Status</span><span class="r" title="Your minutes on the task">You</span>
-        <span class="r" title="Claude's active minutes across runs">Claude</span><span>Runs</span><span>Last</span>
-      </div>
-      <div class="fn-tbody">
-      ${rows.map((r, i) => {
-        const fb = open === r.short && r.feedback;
-        const fix = fixRow(r.short);
-        return html`<div class=${`fn-row ${i === at ? "at" : ""} ${known.has(r.short) ? "link" : ""}`}
-            onClick=${() => { setAt(i); openTask(r); }}>
-          <div class="fn-cells">
-            <span class="fn-label">${r.label}</span>
-            <span class="muted">${r.slot}</span>
-            <span><${Chip} tone=${STATUS_TONE[r.status] ?? "neutral"}>${r.status}<//>${r.times_submitted > 1 ? html`<span class="faint sm"> ×${r.times_submitted}</span>` : null}</span>
-            <span class="num r" title="Your minutes">${r.my_min != null ? mins(r.my_min) : ""}</span>
-            <span class="num r" title="Claude's active minutes">${r.claude_min != null ? mins(r.claude_min) : ""}</span>
-            <span class="muted sm">${runWords(r.runs)}</span>
-            <span class="fn-last">${r.feedback
-              ? html`<button class=${`fn-fb ${fb ? "on" : ""}`} aria-expanded=${!!fb} title="Reviewer feedback"
-                  onClick=${(e) => { e.stopPropagation(); setAt(i); setOpen(fb ? null : r.short); }}>
-                  <span class="fn-q">${fb ? r.last : `“${cutWords(r.feedback, 70)}”`}</span><span class="tri">${fb ? "▾" : "▸"}</span></button>`
-              : html`<span class="muted">${r.last}</span>`}</span>
-          </div>
-          ${fb ? html`<div class="fn-fbbox" onClick=${(e) => e.stopPropagation()}>
-            <div class="fn-fbh"><span class="label">Reviewer feedback</span>
-              ${fix ? html`<button class="btn sm" onClick=${() => { navigate("/"); select(fix.id); }}>Work on it in Home</button>` : null}</div>
-            <div class="fn-fbtext">${r.feedback}</div>
-          </div>` : null}
-        </div>`;
-      })}
-      </div>
-    </section>` : null}
-
-    ${hasLedger || d.spend ? html`<section class="pg-panel fn-sum">
-      <${Ledger} ledger=${d.ledger} />
-      ${d.spend ? html`<div class="fn-kv">
-        <span class="label">AI spend</span>
-        <span class="num"><b>$${d.spend.week_usd.toFixed(2)}</b> this week<span class="sep">·</span><b>$${d.spend.per_submitted_usd.toFixed(2)}</b> per submitted task</span>
-      </div>` : null}
-    </section>` : null}
-  </div>`;
+  if (err && !d) return html`<${Stage} class="su"><${Lede} title="Submitted couldn't load." support=${err} /><//>`;
+  if (!d) return html`<${Stage} class="su"><div class="nw-loading"></div><//>`;
+  const cur = rows.find((r) => r.short === open);
+  return html`<${Stage} class="su">
+    <${Lede} title=${d.lede?.title} support=${d.lede?.support}
+      right=${html`<button type="button" class=${`su-numbtn ${showNums ? "on" : ""}`} aria-expanded=${showNums}
+        onClick=${() => setShowNums(!showNums)}>Numbers <span class="tri">${showNums ? "▾" : "▸"}</span></button>`} />
+    ${showNums ? html`<${Numbers} d=${nums} />` : null}
+    ${rows.length ? html`<div class="su-rows" role="list">
+      ${rows.map((r, i) => html`<div role="listitem" key=${r.short}
+          class=${`su-row ${i === at ? "at" : ""} ${known.has(r.short) ? "link" : ""} st-${r.state}`}
+          onClick=${() => { setAt(i); openTask(r); }}>
+        <div class="su-state"><${Pill} tone=${LESSON_TONE[r.state]}>${LESSON_WORDS[r.state]}<//></div>
+        <div class="su-main">
+          <div class="su-label">${r.label}${r.times > 1 ? html`<span class="su-times">sent ${r.times} times</span>` : null}</div>
+          ${r.sentence ? html`<p class="su-lesson">${r.sentence}</p>` : null}
+        </div>
+        <div class="su-when">${r.when}</div>
+        <div class="su-go">${r.full ? html`<button type="button" class="linkbtn"
+            onClick=${(e) => { e.stopPropagation(); setAt(i); setOpen(r.short); }}>Full review</button>` : null}</div>
+      </div>`)}
+    </div>` : html`<${Empty} title="Nothing submitted yet." body="Tasks show here once you send them to Studio."
+        action=${html`<${Btn} label="Now" onClick=${() => navigate("/")} />`} />`}
+    <${Sheet} open=${!!cur} onClose=${() => setOpen(null)} title=${cur?.label} width=${640}
+      meta=${cur ? html`<${Pill} tone=${LESSON_TONE[cur.state]}>${LESSON_WORDS[cur.state]}<//>` : null}>
+      ${cur ? html`<${ReviewText} text=${cur.full} />` : null}
+    <//>
+  <//>`;
 }

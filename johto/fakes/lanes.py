@@ -68,6 +68,7 @@ def collect(task_dir: Path, run_name: str) -> dict:
             run["diff"], run["transcript"] = info["diff"], info["transcript"]
             if summary:
                 run["active_minutes"] = summary["active_minutes"]
+                run["working_minutes"] = summary.get("working_minutes", summary["active_minutes"])
                 run["human_turns"] = summary["human_turns"]
     workspace.save(task_dir, meta)
     if summary:

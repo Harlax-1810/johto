@@ -1,3 +1,6 @@
+/* Design tokens (spec.md section 4). Each hue has one meaning; builders use these and add no new colours.
+   The block at the end maps the old variable names onto the new palette so screens not yet rebuilt keep working. */
+
 @font-face {
   font-family: "Public Sans";
   src: url("/static/vendor/public-sans.woff2") format("woff2");
@@ -8,67 +11,113 @@
 
 :root {
   /* Surfaces */
-  --page: #F7F7F4;
-  --surface: #FFFFFF;
-  --surface-2: #F2F3F5;
-  --hover: #F5F6F8;
-  --line: #E3E5E8;
-  --line-strong: #CDD1D6;
+  --paper: #F4F2ED;        /* rail, top band, quiet bands */
+  --paper-2: #FAF9F6;      /* recessed: inspector foot, locked editor */
+  --surface: #FFFFFF;      /* stage, cards, inspector */
+  --line: #E6E2D8;         /* hairline */
+  --line-2: #D6D1C4;       /* control borders, dashed empties */
+  --hover: #F6F4EF;
 
-  /* Text */
-  --text: #1C2026;
-  --text-2: #5B636D;
-  --text-3: #8B939D;
+  /* Ink */
+  --ink: #1B1A17;          /* text, the one primary button, selection bar, "his move, no clock" */
+  --ink-2: #545049;
+  --ink-3: #8A857B;
+  --select: #ECE8DE;       /* selected row fill, always with the 3 px ink bar */
 
-  /* Action and selection */
-  --action: #334155;
-  --action-hover: #1E293B;
+  /* Meaning */
+  --wait: #A85F0C;  --wait-dot: #D88A1E;  --wait-wash: #FBF0DC;  --wait-line: #F0D3A0;   /* waiting on Austin, with a clock */
+  --work: #3553D1;  --work-dot: #3553D1;  --work-wash: #EEF1FC;  --work-line: #C9D3F7;   /* a machine is working */
+  --ok: #2D7148;    --ok-dot: #3C8A5A;    --ok-wash: #E7F2EA;    --ok-line: #BFDDC9;     /* done or passes */
+  --stop: #AE2A20;  --stop-dot: #C8372B;  --stop-wash: #FBEAE7;  --stop-line: #F0C4BD;   /* blocks Austin */
+  --ai: #6650C4;    --ai-wash: #F7F5FE;   --ai-line: #DCD4F7;    --ai-rule: #A898EC;     /* written by AI */
+
+  /* Type */
+  --sans: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --serif: Charter, "Bitstream Charter", "Iowan Old Style", "Source Serif 4", Georgia, serif;
+  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+
+  --t-display: 650 34px/1.15 var(--serif);
+  --t-lede: 600 28px/1.2 var(--serif);
+  --t-h2: 600 21px/1.3 var(--serif);
+  --t-h3: 650 20px/1.3 var(--sans);
+  --t-card: 650 16px/1.35 var(--sans);
+  --t-card-serif: 600 20px/1.25 var(--serif);
+  --t-lead: 400 17px/1.5 var(--sans);
+  --t-read: 400 15.5px/1.55 var(--sans);
+  --t-edit: 400 17px/1.65 var(--serif);
+  --t-ui: 400 14px/1.45 var(--sans);
+  --t-sm: 400 13px/1.4 var(--sans);
+  --t-xs: 500 12px/1.3 var(--sans);
+
+  /* Space (4 px grid) */
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 48px; --s8: 64px;
+  --gap-card: 10px;
+  --stage-top: 28px;
+  --stage-x: 44px;
+  --stage-max: 1600px;
+  --measure: 72ch;
+
+  /* Radius */
+  --r-card: 10px;
+  --r-band: 14px;
+  --r-ctl: 6px;
+
+  /* Layout */
+  --rail-w: 216px;
+  --insp-w: 470px;
+  --topnav-h: 48px;
+  --ctl-h: 32px;
+  --ctl-h-sm: 26px;
+  --ctl-h-lg: 44px;
+
+  /* Elevation (only for things that float) */
+  --shadow-pop: 0 16px 40px -12px rgba(27, 26, 23, .30);
+  --shadow-sheet: -16px 0 40px -20px rgba(27, 26, 23, .38);
+  --shadow-foot: 0 -10px 18px -14px rgba(27, 26, 23, .30);
+  --scrim: rgba(27, 26, 23, .22);
+
+  /* Motion */
+  --dur: 160ms;
+  --ease: cubic-bezier(.2, .7, .2, 1);
+
+  /* ---------- Old names, mapped onto the new palette (for screens not yet rebuilt) ---------- */
+  --page: var(--paper);
+  --surface-2: var(--paper-2);
+  --line-strong: var(--line-2);
+  --text: var(--ink);
+  --text-2: var(--ink-2);
+  --text-3: var(--ink-3);
+  --action: var(--ink);
+  --action-hover: #000000;
   --action-text: #FFFFFF;
-  --select: #EEF2F6;
-  --select-bar: #475569;
-  --focus: #64748B;
-
-  /* AI research */
-  --ai-tint: #F6F4FE;
-  --ai-line: #C9BFF5;
-  --ai-label: #5B4BB7;
-
-  /* Status fills (fill / text / dot) */
-  --wait-bg: #FEF3C7; --wait-fg: #7C2D12; --wait-dot: #D97706;
-  --work-dot: #4F46E5;
-  --ok-bg: #DCFCE7;   --ok-fg: #14532D;   --ok-dot: #16A34A;
-  --bad-bg: #FEE2E2;  --bad-fg: #7F1D1D;  --bad-dot: #DC2626;
-  --q-bg: #EEF2F6;    --q-fg: #334155;
-  --overlap-red: #DC2626;
-  --overlap-amber: #D97706;
-
-  /* Terminal */
+  --select-bar: var(--ink);
+  --focus: var(--ink-3);
+  --ai-tint: var(--ai-wash);
+  --ai-label: var(--ai);
+  --wait-bg: var(--wait-wash); --wait-fg: var(--wait);
+  --work-dot-old: var(--work);
+  --ok-bg: var(--ok-wash); --ok-fg: var(--ok);
+  --bad-bg: var(--stop-wash); --bad-fg: var(--stop); --bad-dot: var(--stop-dot);
+  --q-bg: var(--select); --q-fg: var(--ink-2);
+  --overlap-red: var(--stop-dot);
+  --overlap-amber: var(--wait-dot);
   --term-bg: #16191D;
   --term-fg: #D7DAE0;
   --term-line: #2A2F36;
-
-  /* Type */
-  --font: "Public Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --mono: ui-monospace, "SF Mono", Menlo, monospace;
+  --font: var(--sans);
   --fs-xs: 11px;  --lh-xs: 16px;
   --fs-sm: 12px;  --lh-sm: 16px;
   --fs-md: 13px;  --lh-md: 20px;
   --fs-edit: 15px; --lh-edit: 24px;
   --fs-lg: 16px;  --lh-lg: 22px;
   --fs-mono: 12.5px; --lh-mono: 18px;
-
-  /* Geometry */
-  --r: 6px;
+  --r: var(--r-ctl);
   --r-sm: 4px;
   --topbar-h: 36px;
-  --rail-w: 320px;
   --row-h: 28px;
-  --ctl-h: 28px;
   --drawer-w: 800px;
 }
 
-/* Defined, not reachable in v1. */
-[data-theme="dark"] {
-  --page: #111316; --surface: #181B20; --surface-2: #20242A; --hover: #1D2126; --line: #2B3038;
-  --text: #E6E8EB; --text-2: #A3AAB3; --text-3: #737B85; --select: #232A33; --ai-tint: #1F1C2E;
-}
+@media (min-width: 1600px) { :root { --insp-w: 520px; } }
+@media (max-width: 1280px) { :root { --stage-x: 28px; } }
+@media (max-width: 900px) { :root { --stage-x: 16px; --stage-top: 20px; } }

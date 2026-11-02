@@ -8,6 +8,10 @@ text that goes to Studio is what submission.md already holds.
 Studio access goes through S(). Outside the web app that is johto.studio (or the fake with
 JOHTO_FAKE_STUDIO=1). Inside a web job it is a proxy that queues each call on the single Studio
 worker (johto/web/jobs.py), so calls never overlap in the one Studio tab.
+
+A validation lane passes two gates first (lane_gate): no earlier validation run used the same prompt, and
+Studio's AutoQC has passed the opening prompt as it is now. Steps that move a task forward log a stage event
+(johto.stages) on the way.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ import contextlib
 import contextvars
 import fcntl
 import hashlib
+import importlib
 import io
 import json
 import re
@@ -23,9 +28,10 @@ import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime
 from pathlib import Path
 
-from . import config, gists, lanes, lint, studio, sync, transcript, workspace
+from . import config, gists, lanes, lint, stages, studio, sync, transcript, workspace
 
 # --- errors -------------------------------------------------------------------------------------------
 
@@ -34,6 +40,7 @@ HTTP_STATUS = {
     "needs_confirm": 409, "precondition_failed": 409, "lane_busy": 409, "lane_state": 409, "taken": 409,
     "claim_partial": 409, "busy": 409, "gh_account": 409, "conflict": 409, "sync_conflict": 409,
     "missing_fields": 422, "checklist_failed": 422, "guard_missing": 423, "blocked_overlap": 423,
+    "same_prompt": 409, "prompt_qc": 409,
     "studio_error": 502, "github": 502, "setup_failed": 500, "collect_failed": 500, "internal": 500,
 }
 
@@ -452,8 +459,11 @@ def check_repo_allowed(repo: dict) -> list[str]:
 
 def claim(task_id: str, repo: dict, lead: dict | None = None, on_step=lambda step: None, *,
           dossier: dict | None = None, opportunity: dict | None = None,
-          expect_status: str = "Ready to Claim", label: str | None = None) -> Path:
+          expect_status: str = "Ready to Claim", label: str | None = None, origin: dict | None = None) -> Path:
     """Claim the slot, save repo name/URL/language in Studio, and make tasks/<short>/.
+
+    `origin` (a claim from the repo brief: a seed or a place, spec 7.2) is stored in task.json as given, with the
+    dossier id; a place has no opportunity, so `dossier.opportunity_id` stays null.
 
     Raises ActionError("taken", details={"alternative": ...}) before any write, or
     ActionError("claim_partial", details={"step", "task_id", "task_name", "task_dir"}) after the claim.
@@ -505,11 +515,15 @@ def claim(task_id: str, repo: dict, lead: dict | None = None, on_step=lambda ste
         d = workspace.create(t, slot, repo, lead)
         # What Studio already held (a previous writer's text): sync never pulls it in as Austin's.
         cf = after if isinstance(after, dict) else (t.get("custom_fields") or {})
-        extra = {"claimed_at": now_iso(), "studio_at_claim": sync.claim_baseline(cf)}
+        extra = {"claimed_at": now_iso(), "studio_at_claim": sync.claim_baseline(cf),
+                 "feedback_at_claim": sync.h(cf.get("field_review_writer_feedback")) if sync.norm(
+                     cf.get("field_review_writer_feedback")) else ""}
         if lead:
             extra["lead_prev_status"] = lead.get("status")
         if dossier:
             extra["dossier"] = {"id": dossier.get("id"), "opportunity_id": (opportunity or {}).get("id")}
+            if origin:
+                extra["origin"] = {**origin, "dossier_id": dossier.get("id")}
             if "## Dossier (AI research)" not in (d / "brief.md").read_text():
                 with open(d / "brief.md", "a") as fh:
                     fh.write(opportunity_brief(dossier, opportunity))
@@ -523,6 +537,8 @@ def claim(task_id: str, repo: dict, lead: dict | None = None, on_step=lambda ste
     if lead:
         mark_lead(lead["id"], "claimed", name)
     drop_from_slots(task_id)
+    stages.log(d, "claimed", task_id=task_id, task_name=name, repo=repo["full_name"], lead=(lead or {}).get("id"),
+               dossier=(dossier or {}).get("id"))
     return d
 
 
@@ -557,16 +573,58 @@ def _known_containers() -> dict[str, tuple[Path, dict]]:
     return out
 
 
-def start_lane(d: Path, kind: str, log=lambda line: None) -> Path:
+def start_lane(d: Path, kind: str, log=lambda line: None, *, again: bool = False, qc: bool = False,
+               skip_qc: bool = False, stop_others: bool = False, need_prompt: bool = False) -> Path:
     """A new lane folder for a calibration or validation run (setup only; Claude is started by Austin).
 
     While a lane slot is free, the new lane takes it and running lanes are left alone (two fit on one
     machine; see lanes.SLOTS). With both slots taken, setting up means stopping a lane, so it refuses while
     any lane's Claude is alive, while a running lane's run isn't collected, or while a prework container the
-    app doesn't know is running: the app never stops a lane whose run isn't collected.
+    app doesn't know is running: the app never stops a lane whose run isn't collected. stop_others (the
+    CLI's --stop-others, Austin's explicit flag) skips those checks and stops every running lane.
+
+    A validation lane then passes lane_gate (again, qc, skip_qc and need_prompt go to it). The run's entry
+    records the prompt it started with, and a lane_started event is logged.
     """
     if kind not in lanes.KINDS:
         raise ActionError("invalid", f"kind must be one of {', '.join(lanes.KINDS)}.")
+    if not stop_others:
+        _check_lanes_free()
+    gate = lane_gate(d, kind, again=again, qc=qc, skip_qc=skip_qc, need_prompt=need_prompt, log=log)
+    if qc and not stop_others:
+        _check_lanes_free()   # AutoQC took minutes; a lane may have started meanwhile
+    with capture_prints(log):
+        try:
+            run_dir = L().new_lane(d, kind, stop_others=stop_others)
+        except RuntimeError as e:
+            raise ActionError("setup_failed", str(e).splitlines()[0], {"log": str(e)}) from e
+    _record_lane_start(d, run_dir, kind, gate)
+    return run_dir
+
+
+def _record_lane_start(d: Path, run_dir: Path, kind: str, gate: dict) -> None:
+    """prompt_sha and prompt_head on the run (lanes.new_lane records them; the fake lanes don't), and the event."""
+    started = lanes.prompt_record(d)
+    name = run_dir.name
+    rec: dict = {}
+
+    def put(m):
+        for r in m.get("runs", []):
+            if r.get("dir") == f"runs/{name}":
+                for k, v in started.items():
+                    r.setdefault(k, v)
+                rec.update(r)
+    try:
+        update_meta(d, put)
+    except (OSError, ValueError):
+        pass
+    stages.log(d, "lane_started", run=name, lane_kind=kind, host=rec.get("host") or "local",
+               port_slot=rec.get("port_slot"), prompt_sha=rec.get("prompt_sha"), qc_audit=gate.get("audit_id"),
+               again=gate.get("again") or None, skip_qc=gate.get("skip_qc") or None)
+
+
+def _check_lanes_free() -> None:
+    """With both lane slots taken, refuse unless every running lane is idle, collected and known."""
     if config.FAKE_STUDIO is False and lanes.free_slot() is None:
         running = lanes.running_lanes()
         active = [c for c in running if lanes.claude_active(c)]
@@ -582,15 +640,22 @@ def start_lane(d: Path, kind: str, log=lambda line: None) -> Path:
             if not rec.get("collected_at"):
                 raise ActionError("lane_state", f"{td.name} {Path(rec['dir']).name} isn't collected yet. Collect it first.",
                                   {"short": td.name, "run": Path(rec["dir"]).name})
-    with capture_prints(log):
-        try:
-            return L().new_lane(d, kind, stop_others=False)
-        except RuntimeError as e:
-            raise ActionError("setup_failed", str(e).splitlines()[0], {"log": str(e)}) from e
 
 
 def latest_run(d: Path) -> str | None:
     return L().latest_run(d, "validate") or L().latest_run(d, "calib")
+
+
+def resume_command(d: Path, run: str, rec: dict | None = None) -> str:
+    """The exact command that re-enters a run's Claude session. A PC lane: ssh into its folder there and run
+    claude-dev (running it again reattaches to the same tmux session; a second lane's ports are already in its
+    launcher). A lane on this Mac: `johto resume <task> <run>`."""
+    rec = rec or run_record(d, run) or {}
+    remote = lanes.remote_of(rec)
+    if remote:
+        host, rdir = remote
+        return f"ssh -t {host} 'cd {rdir}/model_a && ./claude-dev {lanes.LAUNCH_ARGS}'"
+    return f"johto resume {d.name} {run}"
 
 
 def run_record(d: Path, run: str, meta: dict | None = None) -> dict | None:
@@ -599,7 +664,8 @@ def run_record(d: Path, run: str, meta: dict | None = None) -> dict | None:
 
 
 def collect(d: Path, run: str | None = None, log=lambda line: None) -> dict:
-    """prework collect for one run: diff, transcript and summary, recorded in task.json."""
+    """prework collect for one run: diff, transcript and summary, recorded in task.json. Then the "collected"
+    event and the writing kit (lanes.after_collect); "kit" in the result is its path, or None."""
     check_run_name(run)
     run = run or latest_run(d)
     if not run:
@@ -611,9 +677,12 @@ def collect(d: Path, run: str | None = None, log=lambda line: None) -> dict:
             info = L().collect(d, run)
         except RuntimeError as e:
             raise ActionError("collect_failed", str(e)) from e
+        if "after" not in info:   # lanes.collect runs it; the fake lanes don't
+            info["after"] = lanes.after_collect(d, run, info.get("summary"))
     s = info.get("summary")
     n = len(transcript.find(d / "runs" / run))
     return {**info, "run": run, "transcripts": n, "diff_stat": lanes.diff_stat(info.get("diff")),
+            "kit": (info.get("after") or {}).get("kit"),
             "problems": transcript.model_problems(s) if s else ["no transcript found"],
             "note": (f"{n} transcripts in {run}/prework_output; using the newest. More than one usually "
                      "means the lane was reused.") if n > 1 else None}
@@ -670,14 +739,71 @@ def clean(d: Path, run: str | None = None, force: bool = False) -> dict:
 # --- which run is submitted ---------------------------------------------------------------------------
 
 
+def _run_number(name: str) -> int:
+    tail = name.rpartition("-")[2]
+    return int(tail) if tail.isdigit() else 0
+
+
+def run_collected(rec: dict | None) -> bool:
+    """A run whose transcript and diff are on this Mac (collect wrote them)."""
+    rec = rec or {}
+    return bool(rec.get("transcript") or rec.get("collected_at") or (rec.get("auto") or {}).get("collected_at"))
+
+
+def submission_run(meta: dict, d: Path) -> str | None:
+    """The one rule for which run a submission uses. Everything that means "the run" calls it: validation_run,
+    the checklist, gists, the Claude-minutes field, `johto where`, and the web app (through submission_run_info).
+
+    The run Austin chose (task.json "submission_run") while its folder exists, else the newest collected
+    validation run. A validation run that is still going or isn't collected is never picked by default: its
+    transcript and diff aren't here yet. None when there is neither."""
+    chosen = meta.get("submission_run")
+    if chosen and RUN_NAME.match(str(chosen)) and (Path(d) / "runs" / chosen).is_dir():
+        return chosen
+    best = None
+    for rec in meta.get("runs") or []:
+        name = Path(rec.get("dir") or "").name
+        if not name.startswith("validate-") or not RUN_NAME.match(name) or not run_collected(rec):
+            continue
+        if not (Path(d) / "runs" / name).is_dir():
+            continue
+        if best is None or _run_number(name) > _run_number(best):
+            best = name
+    return best
+
+
+def newer_uncollected(meta: dict, d: Path, than: str | None) -> list[str]:
+    """Validation runs started after `than` (or any, when None) that aren't collected, oldest first: the lane
+    still running, or a run that ended without a collect. The submission doesn't use them until collected."""
+    floor = _run_number(than) if than and than.startswith("validate-") else 0
+    out = []
+    for rec in meta.get("runs") or []:
+        name = Path(rec.get("dir") or "").name
+        if (name.startswith("validate-") and RUN_NAME.match(name) and _run_number(name) > floor
+                and not run_collected(rec) and (Path(d) / "runs" / name).is_dir()):
+            out.append(name)
+    return sorted(out, key=_run_number)
+
+
+def submission_run_info(meta: dict, d: Path) -> dict:
+    """{run, by, collected, newer}: the submission run (submission_run), how it was picked ("chosen" when
+    Austin picked it, "latest" for the newest collected validation run, None), and newer validation runs that
+    aren't collected yet. For the web app's task data and `johto where`."""
+    run = submission_run(meta, d)
+    by = None if run is None else ("chosen" if meta.get("submission_run") == run else "latest")
+    rec = run_record(d, run, meta) if run else None
+    return {"run": run, "by": by, "collected": run_collected(rec),
+            "newer": newer_uncollected(meta, d, run if (run or "").startswith("validate-") else None)}
+
+
 def validation_run(d: Path, run: str | None = None) -> tuple[str | None, dict | None]:
-    """The run being submitted: `run` if given, else task.json's submission_run, else the latest validate-N."""
+    """The run being submitted: `run` if given, else submission_run (the chosen run, else the newest
+    collected validation run)."""
     check_run_name(run)
     meta = workspace.load(d)
-    run = run or meta.get("submission_run")
-    if run and (not RUN_NAME.match(run) or not (d / "runs" / run).is_dir()):
+    if run and not (d / "runs" / run).is_dir():
         run = None
-    run = run or L().latest_run(d, "validate")
+    run = run or submission_run(meta, d)
     if not run:
         return None, None
     return run, run_record(d, run, meta)
@@ -710,7 +836,7 @@ def runs_overview(d: Path) -> list[dict]:
     for rec in meta.get("runs", []):
         name = Path(rec["dir"]).name
         out.append({"run": name, "kind": rec.get("kind"), "collected": bool(rec.get("transcript")),
-                    "active_minutes": rec.get("active_minutes"), "human_turns": rec.get("human_turns"),
+                    "active_minutes": workspace.run_minutes(rec, d), "human_turns": rec.get("human_turns"),
                     "submitted": name == cur})
     return out
 
@@ -721,9 +847,13 @@ def run_problems(d: Path, run: str | None = None) -> list[tuple]:
     """Checks on the submitted run: collected, model and effort, async = one prompt, prompt matches."""
     meta = workspace.load(d)
     sub = workspace.parse_submission(d)
+    asked = run
     run, rec = validation_run(d, run)
     out = []
-    if not run:
+    waiting = newer_uncollected(meta, d, run if (run or "").startswith("validate-") else None)
+    if not run and waiting:
+        out.append((lint.ERROR, "Runs", f"{waiting[-1]} isn't collected yet (collect {waiting[-1]})"))
+    elif not run:
         out.append((lint.ERROR, "Runs", "no validation run yet (start a validation lane)"))
     elif not (rec or {}).get("transcript"):
         out.append((lint.ERROR, "Runs", f"{run} not collected yet (collect {run})"))
@@ -738,8 +868,13 @@ def run_problems(d: Path, run: str | None = None) -> list[tuple]:
         if s["first_prompt"] and prompt and s["first_prompt"].strip() != prompt.strip():
             out.append((lint.WARN, "Runs", f"{run}'s first prompt differs from your Opening Prompt"))
         if s["active_minutes"] < 8 and (sub["ratings"].get("one-shot") or "").lower() == "no":
-            out.append((lint.WARN, "Runs", f"Claude ran only {s['active_minutes']} minutes; reviewers reject tasks Opus "
-                                           "finishes in about 5 minutes"))
+            out.append((lint.WARN, "Runs", f"Claude worked {s['active_minutes']} minutes; reviewers have dropped tasks "
+                                           "Opus finishes in about 5 minutes, and short runs with real misses have "
+                                           "passed"))
+        if waiting and not asked and meta.get("submission_run") != run:
+            out.append((lint.WARN, "Runs", f"{waiting[-1]} is newer but not collected; the submission uses {run} "
+                                           f"until it is (collect {waiting[-1]}, or choose a run with "
+                                           f"`johto submission-run {d.name} <run>`)"))
     return out
 
 
@@ -747,7 +882,18 @@ def check(d: Path, run: str | None = None) -> list[tuple]:
     """Local lint plus run checks: [(level, field, message)]. Flags only, never wording."""
     meta = workspace.load(d)
     sub = workspace.parse_submission(d)
-    return lint.run_all(meta, sub) + run_problems(d, run)
+    return lint.run_all(meta, sub) + run_problems(d, run) + saved_text_flags(d)
+
+
+def saved_text_flags(d: Path) -> list[tuple]:
+    """lint.check_saved_fields: Studio's saved text cut off, or shorter than the local copy. Never raises."""
+    saved = getattr(lint, "check_saved_fields", None)
+    if saved is None:
+        return []
+    try:
+        return list(saved(d))
+    except Exception as e:
+        return [(lint.WARN, "Studio", f"the saved-text check didn't run: {e}")]
 
 
 def fields(d: Path, run: str | None = None) -> dict:
@@ -755,7 +901,7 @@ def fields(d: Path, run: str | None = None) -> dict:
     meta = workspace.load(d)
     sub = workspace.parse_submission(d)
     _, rec = validation_run(d, run)
-    return workspace.to_fields(meta, sub, (rec or {}).get("active_minutes"))
+    return workspace.to_fields(meta, sub, workspace.run_minutes(rec, d))
 
 
 def push(d: Path, run: str | None = None, checked: bool = False, task: dict | None = None) -> dict:
@@ -771,12 +917,15 @@ def push(d: Path, run: str | None = None, checked: bool = False, task: dict | No
         raise ActionError("sync_conflict", f"Changed both here and in Studio since the last save: {names}. "
                           "Keep one version in both places, then save again.",
                           {"fields": {sync.FIELD_NAMES[k]: v for k, v in pulled["conflicts"].items()}})
+    if pulled["pulled"]:
+        stages.log(d, "studio_pulled", fields=pulled["pulled"])
     f = fields(d, run)
     after = S().patch_fields(meta["task_id"], f)
     at = now_iso()
     update_meta(d, lambda m: m.update(pushed={"at": at, "fields": {k: sha12(v) for k, v in f.items()}}))
     sync.mark_pushed(d, f, update_meta)
     save_studio_snapshot(d, after if isinstance(after, dict) else None)
+    stages.log(d, "studio_pushed", fields=sorted(f), run=run)
     return {"fields": f, "saved": len(f), "at": at, "pulled": pulled["pulled"]}
 
 
@@ -786,24 +935,73 @@ def pull_from_studio(d: Path, write_section=None, write_ratings=None) -> dict:
     if st["status"] != "Writing" or not st["mine"]:
         return {"status": st["status"], "pulled": [], "conflicts": {}}
     res = sync.pull(d, st["fields"], write_section, write_ratings, update_meta=update_meta)
+    if res["pulled"]:   # only when something came in: the web app's poller pulls every few minutes
+        stages.log(d, "studio_pulled", fields=res["pulled"])
     return {"status": st["status"], "pulled": res["pulled"],
             "conflicts": {sync.FIELD_NAMES[k]: v["why"] for k, v in res["conflicts"].items()}}
 
 
-def upload_gists(d: Path, run: str | None = None, on_step=lambda step: None) -> dict:
-    """Secret gists for the submitted run's transcript and diff; uploads only what is missing (or what
-    belongs to a different run than the one now chosen)."""
-    meta = workspace.load(d)
+GIST_SOURCES = {"conversation_log": "transcript", "final_output": "diff"}
+
+
+def file_sha(path) -> str | None:
+    """sha256 (16 hex) of a file's bytes, or None when it can't be read."""
+    if not path:
+        return None
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()[:16]
+    except OSError:
+        return None
+
+
+def gist_state(d: Path, run: str | None = None, meta: dict | None = None) -> dict:
+    """Which gists the submission run needs uploaded: {run, rec, gists, need: [key], why: {key: reason}, sha}.
+
+    A gist link counts only for the run it was made from and the exact file it holds: links are bound to the
+    sha of the transcript and diff at upload time, so a run resumed and collected again gets new gists.
+    Links saved before johto recorded a sha are uploaded again once (what they hold can't be told)."""
+    meta = meta or workspace.load(d)
     run, rec = validation_run(d, run)
+    g = dict(meta.get("gists") or {})
+    shas = {k: file_sha((rec or {}).get(src)) for k, src in GIST_SOURCES.items()}
+    old = g.get("sha") or {}
+    need, why = [], {}
+    for k in GIST_SOURCES:
+        if not g.get(k):
+            reason = None if not g.get("run") or g["run"] == run else f"the gists are for {g['run']}"
+            why[k] = reason or "not uploaded yet"
+        elif g.get("run") and g["run"] != run:
+            why[k] = f"the gists are for {g['run']}"
+        elif not old.get(k):
+            why[k] = "uploaded before johto recorded which file it holds"
+        elif shas[k] and old[k] != shas[k]:
+            why[k] = f"{run}'s {GIST_SOURCES[k]} changed since the upload"
+        else:
+            continue
+        need.append(k)
+    return {"run": run, "rec": rec, "gists": g, "need": need, "why": why, "sha": shas}
+
+
+def upload_gists(d: Path, run: str | None = None, on_step=lambda step: None) -> dict:
+    """Secret gists for the submitted run's transcript and diff. Uploads what is missing, what belongs to a
+    different run than the one now chosen, and what no longer matches the run's files (gist_state)."""
+    meta = workspace.load(d)
+    gs = gist_state(d, run, meta)
+    run, rec = gs["run"], gs["rec"]
     if not rec or not rec.get("transcript") or not rec.get("diff"):
         raise ActionError("lane_state", "Need a collected run (transcript and diff) before uploading gists.",
                           {"run": run})
-    g = dict(meta.get("gists") or {})
+    g = gs["gists"]
     if g.get("run") and g["run"] != run:
         g = {}
-    need = [k for k in ("conversation_log", "final_output") if not g.get(k)]
+    need = gs["need"]
     if not need:
         return {"gists": g, "uploaded": [], "run": run}
+    sha = dict(g.get("sha") or {})
     on_step("gh_account")
     acct = G().active_account()
     if acct != gists.GH_ACCOUNT:
@@ -815,14 +1013,18 @@ def upload_gists(d: Path, run: str | None = None, on_step=lambda step: None) -> 
         if "conversation_log" in need:
             g["conversation_log"] = G().create(rec["transcript"], f"{short}-conversation.jsonl",
                                                f"Johto {meta['task_name']} conversation log")
+            sha["conversation_log"] = gs["sha"]["conversation_log"]
         if "final_output" in need:
             g["final_output"] = G().create(rec["diff"], f"{short}-final.diff", f"Johto {meta['task_name']} final output")
+            sha["final_output"] = gs["sha"]["final_output"]
     except RuntimeError as e:
         raise ActionError("github", str(e)) from e
     finally:
         g["run"] = run
+        g["sha"] = {k: v for k, v in sha.items() if v}
+        g["uploaded_at"] = now_iso()
         update_meta(d, lambda m: m.update(gists=g))
-    return {"gists": g, "uploaded": need, "run": run}
+    return {"gists": g, "uploaded": need, "run": run, "why": {k: gs["why"][k] for k in need}}
 
 
 # --- AutoQC ---------------------------------------------------------------------------------------------
@@ -859,26 +1061,38 @@ def start_qc(d: Path, spec: str = "AutoQC", checked: bool = False) -> str | None
     if spec not in config.QC_SPECS:
         raise ActionError("invalid", f"spec must be one of {', '.join(config.QC_SPECS)}.")
     meta = workspace.load(d)
-    if not checked:
-        recheck(meta["task_id"], "Writing")
+    # Studio's prompt as the audit starts, so lane_gate can tell which prompt it checked. `checked` callers
+    # read or saved the task a moment ago, and that left the snapshot current.
+    t = recheck(meta["task_id"], "Writing") if not checked else None
+    cf = (t or {}).get("custom_fields") if t else (studio_snapshot(d) or {}).get("fields")
+    prompt = (cf or {}).get("field_opening_prompt")
     res = S().run_qc(meta["task_id"], spec) or {}
     aid = res.get("qc_audit_id") or res.get("id")
     entry = {"audit_id": aid, "spec": spec, "started_at": now_iso(), "status": "running",
-             "counts": {"pass": 0, "fail": 0, "neutral": 0}, "dims": [], "dedup": res.get("dedup")}
+             "counts": {"pass": 0, "fail": 0, "neutral": 0}, "dims": [], "dedup": res.get("dedup"),
+             "prompt_sha": lanes.prompt_sha(prompt) if prompt else None}
     update_meta(d, lambda m: m.setdefault("qc", []).append(entry))
     return aid
 
 
 def record_qc(d: Path, audit_id: str, audit: dict) -> dict:
     summ = qc_summary(audit)
+    ended: dict = {}
 
     def put(m):
         for q in m.setdefault("qc", []):
             if q.get("audit_id") == audit_id:
+                if q.get("status") == "running" and summ["status"] != "running":
+                    ended.update(spec=q.get("spec"), prompt_sha=q.get("prompt_sha"))
                 q.update(status=summ["status"], counts=summ["counts"], dims=summ["dims"],
                          finished_at=now_iso() if summ["status"] != "running" else None,
                          failure_reason=summ.get("failure_reason"))
     update_meta(d, put)
+    if ended.get("spec") == "AutoQC":   # once per audit, when it finishes
+        failed = prompt_failures(summ["dims"])
+        stages.log(d, "prompt_qc", audit_id=audit_id, status=summ["status"], prompt_sha=ended.get("prompt_sha"),
+                   prompt=("fail" if failed else "pass") if summ["status"] == "completed" else None,
+                   failed=[x["dimension"] for x in failed] or None)
     return summ
 
 
@@ -906,19 +1120,497 @@ def latest_qc(meta: dict, spec: str = "AutoQC") -> dict | None:
     return next((q for q in reversed(meta.get("qc") or []) if q.get("spec") == spec), None)
 
 
+# --- validation gates -----------------------------------------------------------------------------------
+# Two checks before a validation lane, from real incidents: a second validation run because AutoQC asked
+# for a prompt change after the first (t4sk0003), and a validation run that repeated the earlier run's
+# prompt by mistake (t4sk0004 validate-2). Calibration lanes have no gate.
+
+PROMPT_DIMS_FALLBACK = ("Prompt Style Fit", "Nothing Private Leaks", "Doesn't Solve It", "No Formatting Tells",
+                        "AI Detection")
+PROMPT_FIELD = "field_opening_prompt"
+QC_GATE_POLL_S = 15
+QC_GATE_TIMEOUT_S = 900
+
+
+def prompt_dimensions() -> tuple[str, ...]:
+    """The AutoQC dimensions that judge the opening prompt: johto.rules' list, else the built-in one."""
+    try:
+        rules = importlib.import_module(f"{__package__}.rules")
+        dims = tuple(getattr(rules, "PROMPT_QC_DIMENSIONS", ()) or ())
+    except Exception:   # rules is optional; any trouble there falls back
+        dims = ()
+    return dims or PROMPT_DIMS_FALLBACK
+
+
+# AutoQC dimensions that score the whole task (every field), not the prompt alone. A failure there blocks a
+# validation lane only when its justification puts it on the opening prompt; a flag caused by the goal or the
+# notes is a warning, because those are written after the run and fixing them never needs another run.
+WHOLE_TASK_DIMS = ("AI Detection",)
+_PROMPT_REF = re.compile(r"\bopening[ _-]?prompt\b|\bfield_opening_prompt\b|\bprompt\b", re.I)
+_PROMPT_CLEARED = re.compile(r"\b(?:is|was|are|were)?\s*not\s+(?:flagged|ai|likely|detected|generated|an issue)\b|"
+                             r"\bisn't\s+(?:flagged|ai|likely)\b|\bhuman[- ]written\b|\breads?\s+(?:as|like)\s+(?:a\s+)?human\b|"
+                             r"\b(?:passes|passed|fine|clean|unflagged)\b|\bscored?\s+low\b|\blow\s+(?:ai|score|likelihood)\b", re.I)
+
+
+def points_at_prompt(justification: str | None) -> bool:
+    """Does a whole-task dimension's justification blame the opening prompt? True when a sentence names the
+    prompt without clearing it ("the opening prompt reads as human" clears it). An empty justification can't
+    say, so it is False."""
+    for sent in re.split(r"(?<=[.;!?])\s+|\n+", justification or ""):
+        if _PROMPT_REF.search(sent) and not _PROMPT_CLEARED.search(sent):
+            return True
+    return False
+
+
+def prompt_failures(dims: list[dict]) -> list[dict]:
+    """The failed dimensions in a qc_summary dims list that block a validation lane: the prompt dimensions,
+    with a whole-task one (AI Detection) only when its justification points at the opening prompt."""
+    names = set(prompt_dimensions())
+    out = []
+    for x in dims or []:
+        if x.get("dimension") not in names or x.get("status") != "fail":
+            continue
+        if x["dimension"] in WHOLE_TASK_DIMS and not points_at_prompt(x.get("justification")):
+            continue
+        out.append(x)
+    return out
+
+
+def prompt_warnings(dims: list[dict]) -> list[dict]:
+    """Failed whole-task dimensions that don't point at the opening prompt: shown as warnings, never blocking."""
+    return [x for x in dims or [] if x.get("dimension") in WHOLE_TASK_DIMS and x.get("status") == "fail"
+            and not points_at_prompt(x.get("justification"))]
+
+
+def _log_prompt_warnings(dims: list[dict], log) -> None:
+    for x in prompt_warnings(dims):
+        why = _one_line(x.get("justification") or "", 140)
+        log(f"warning: AutoQC's {x['dimension']} flagged the task{f' ({why})' if why else ''}. It scores every field "
+            "and doesn't name the opening prompt here, so the lane starts. Check the goal and notes before you submit.")
+
+
+def _ts(iso: str | None) -> float | None:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(str(iso).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def _when(iso: str | None) -> str:
+    """'22:10' today, else 'Oct 31 22:10', in local time."""
+    t = _ts(iso)
+    if t is None:
+        return "at an unknown time"
+    dt = datetime.fromtimestamp(t)
+    return f"{dt:%H:%M}" if dt.date() == datetime.now().date() else f"{dt:%b} {dt.day} {dt:%H:%M}"
+
+
+def _one_line(text: str, limit: int = 160) -> str:
+    s = " ".join((text or "").split())
+    return s if len(s) <= limit else s[:limit].rsplit(" ", 1)[0] + "..."
+
+
+def _local_prompt(d: Path) -> str:
+    return workspace.parse_submission(d)["sections"].get("Opening Prompt", "").strip()
+
+
+PROMPT_OVERLAP_MSG = ("Your opening prompt repeats AI text word for word. Reword it or mark it as your own words, "
+                      "then start the run.")
+
+
+def _guard_prompt_overlap(d: Path) -> None:
+    """An unaccepted red overlap in the opening prompt blocks the validation run and the prompt's save to Studio
+    (the same rule as Save to Studio): the prompt reaches Studio and Claude only in his own words. Fails closed
+    when the guard can't run."""
+    text = workspace.parse_submission(d)["sections"].get("Opening Prompt", "")
+    if not text.strip():
+        return
+    try:
+        from .web.guard import overlap
+        red = overlap.unaccepted_red(d, {"opening_prompt": text}).get("opening_prompt")
+    except Exception as e:
+        raise ActionError("guard_missing", f"The overlap check didn't run ({e}), so the run waits until it does.") from e
+    if red:
+        raise ActionError("blocked_overlap", PROMPT_OVERLAP_MSG, {"overlaps": red, "fields": ["opening_prompt"]})
+
+
+def _run_prompt(d: Path, rec: dict) -> tuple[str | None, str | None]:
+    """(sha, head) of the prompt a run used: its transcript's first prompt when the run folder holds one
+    (what Claude really got), else what was recorded at lane start. head is set only when that is all there is."""
+    logs = transcript.find(d / rec["dir"])
+    if logs:
+        try:
+            first = transcript.summarize(logs[-1]).get("first_prompt")
+        except (OSError, ValueError):
+            first = None
+        if first:
+            return lanes.prompt_sha(first), None
+    if rec.get("prompt_sha"):
+        return rec["prompt_sha"], None
+    if rec.get("prompt_head"):
+        return None, " ".join(rec["prompt_head"].split())
+    return None, None
+
+
+def same_prompt_runs(d: Path, prompt: str, meta: dict | None = None) -> list[dict]:
+    """Earlier validation runs that used this prompt: [{run, created_at, torn_down, by, host, rec}], oldest first.
+    host is the PC's ssh name for a PC run, else None."""
+    meta = meta or workspace.load(d)
+    sha, flat = lanes.prompt_sha(prompt), " ".join(prompt.split())
+    out = []
+    for rec in meta.get("runs") or []:
+        if rec.get("kind") != "validate" or not rec.get("dir"):
+            continue
+        rsha, head = _run_prompt(d, rec)
+        if rsha == sha or (head and flat.startswith(head)):
+            remote = lanes.remote_of(rec)
+            out.append({"run": Path(rec["dir"]).name, "created_at": rec.get("created_at"),
+                        "torn_down": bool(rec.get("torn_down_at")), "by": "start" if head else "prompt",
+                        "host": remote[0] if remote else None, "rec": rec})
+    return out
+
+
+def _review_note(d: Path, run: str) -> str:
+    """" It has a GPT Pro review (saved HH:MM)." when one is saved for the run, else ""."""
+    try:
+        from . import reviews
+        r = reviews.latest(d, run)
+    except Exception:
+        return ""
+    if not r:
+        return ""
+    turn = f" of turn {r['turn']}" if r.get("turn") else ""
+    return f" It has a saved review{turn} ({_when(r.get('saved_at'))}): `johto review show {d.name} {Path(r['name']).stem}`."
+
+
+def _same_prompt_error(d: Path, hits: list[dict]) -> ActionError:
+    last = hits[-1]
+    names = " and ".join(h["run"] for h in hits)
+    how = " (its first 200 characters match)" if last["by"] == "start" else ""
+    who = "it" if len(hits) == 1 else last["run"]
+    where = f" on {last['host']}" if last.get("host") else ""
+    msg = f"{names} already ran this prompt{how}; {who} started {_when(last['created_at'])}{where}."
+    msg += _review_note(d, last["run"])
+    if not last["torn_down"]:
+        msg += f" To steer it instead: `{resume_command(d, last['run'], last.get('rec'))}`."
+    msg += f" To start a new run with the same prompt anyway: `johto lane {d.name} validate --again`."
+    return ActionError("same_prompt", msg, {"runs": [{k: v for k, v in h.items() if k != "rec"} for h in hits],
+                                            "run": last["run"]})
+
+
+def _qc_error(d: Path, reason: str, message: str, **details) -> ActionError:
+    """message names the way out as {fix}. A plain replace, not format(): it may quote AutoQC's text."""
+    fix = f"`johto lane {d.name} validate --qc`"
+    return ActionError("prompt_qc", message.replace("{fix}", fix), {"reason": reason, "fix": fix, **details})
+
+
+def _prompt_history(task_id: str) -> list[tuple[int, float | None, str]]:
+    """[(version, updated_at, prompt sha)] oldest first, from Studio's task history (one row per version).
+    Empty when Studio has no such history (the fake keeps transitions only)."""
+    try:
+        h = S().history(task_id)
+    except studio.StudioError:
+        return []
+    rows = h.get("history", []) if isinstance(h, dict) else h
+    out = []
+    for r in rows or []:
+        if isinstance(r, dict) and isinstance(r.get("custom_fields"), dict) and r.get("version") is not None:
+            out.append((int(r["version"]), _ts(r.get("updated_at")),
+                        lanes.prompt_sha(r["custom_fields"].get(PROMPT_FIELD))))
+    return sorted(out, key=lambda x: x[0])
+
+
+def _audit_saw_prompt(entry: dict, audit: dict | None, sha: str, history) -> bool | None:
+    """Did this AutoQC audit check the prompt whose sha is `sha`? None when it can't be told.
+
+    In order: the prompt this app recorded when it started the audit (start_qc); the audited task version
+    (subject_version) in Studio's history; else whether the prompt took its current text, by that history,
+    before the audit was created."""
+    if entry.get("prompt_sha"):
+        return entry["prompt_sha"] == sha
+    rows = history()
+    ver = (audit or {}).get("subject_version")
+    if ver is not None:
+        for v, _, s in rows:
+            if v == int(ver):
+                return s == sha
+    since = None
+    for _, at, s in rows:   # the start of the last stretch of versions holding this prompt
+        since = (since if since is not None else at) if s == sha else None
+    created = _ts((audit or {}).get("created_at")) or _ts(entry.get("started_at"))
+    if since is not None and created is not None:
+        return created >= since
+    return None
+
+
+def prompt_qc_status(d: Path, prompt: str) -> dict:
+    """Has AutoQC passed this opening prompt? {"ok", "reason", "audit_id", "created_at", "failed", "dims"}.
+
+    The rule: take the latest completed AutoQC audit of the task (Studio's list, plus the ones this app
+    started). It counts only when it is known to have checked this exact prompt (see _audit_saw_prompt);
+    otherwise there has been no AutoQC since the prompt changed. A counted audit passes when no prompt
+    dimension failed. reason: "passed", "failed", "stale" (no audit of this prompt) or "running"."""
+    meta = workspace.load(d)
+    tid = meta["task_id"]
+    sha = lanes.prompt_sha(prompt)
+    local = {q["audit_id"]: q for q in meta.get("qc") or [] if q.get("spec") == "AutoQC" and q.get("audit_id")}
+    remote: dict[str, dict] = {}
+    try:
+        for a in S().qc_audits(tid) or []:
+            aid = a.get("qc_audit_id") or a.get("id")
+            if aid and (a.get("qc_spec_id") == config.QC_SPECS["AutoQC"] or a.get("spec") == "AutoQC"):
+                remote[aid] = a
+    except studio.StudioError:
+        pass   # what this app recorded still counts
+    rows = []
+    for aid in set(local) | set(remote):
+        a, q = remote.get(aid), local.get(aid) or {}
+        status = (a or {}).get("status") or q.get("status")
+        created = (a or {}).get("created_at") or q.get("started_at")
+        rows.append((_ts(created) or 0.0, aid, a, q, status, created))
+    rows.sort(key=lambda r: r[0])
+    done = [r for r in rows if r[4] == "completed"]
+    running = [r for r in rows if r[4] not in ("completed", "failed", "cancelled") and (not done or r[0] > done[-1][0])]
+    hist: list | None = None
+
+    def history():
+        nonlocal hist
+        if hist is None:
+            hist = _prompt_history(tid)
+        return hist
+    base = {"ok": False, "audit_id": None, "created_at": None, "failed": [], "dims": [],
+            "running": running[-1][5] if running else None}
+    if not done:
+        return {**base, "reason": "running" if running else "stale"}
+    _, aid, a, q, _, created = done[-1]
+    out = {**base, "audit_id": aid, "created_at": created}
+    if _audit_saw_prompt(q, a, sha, history) is not True:
+        return {**out, "reason": "running" if running else "stale"}
+    dims = q.get("dims") if q.get("status") == "completed" else None
+    if not dims:
+        try:
+            dims = qc_summary(a if a and a.get("outcome") else S().qc_audit(aid))["dims"]
+        except studio.StudioError:
+            dims = []
+    failed = prompt_failures(dims)
+    return {**out, "ok": not failed, "reason": "failed" if failed else "passed", "failed": failed, "dims": dims,
+            "warnings": prompt_warnings(dims)}
+
+
+def _studio_prompt(d: Path, log) -> str | None:
+    """Studio's opening prompt now (GET the task). None when Studio is off for this copy of the data."""
+    try:
+        return studio_status(d)["fields"].get(PROMPT_FIELD) or ""
+    except config.RealWriteRefused:
+        log("Studio is off for this copy of the data, so the prompt AutoQC check is skipped.")
+        return None
+    except studio.StudioError as e:
+        raise ActionError("prompt_qc", f"Couldn't read Studio to check the prompt's AutoQC ({studio_error_dict(e)['message']}). "
+                          f"Open the Studio tab and try again, or start without the check: "
+                          f"`johto lane {d.name} validate --skip-qc`.", {"reason": "unreadable"}) from e
+
+
+def _take_studio_prompt(d: Path, text: str) -> None:
+    """Studio's prompt into submission.md (only Studio's copy changed since they last matched)."""
+    sync.write_section_file(d, "Opening Prompt", text)
+
+    def put(m):
+        m.setdefault("synced", {})[PROMPT_FIELD] = sync.h(text)
+        conflicts = (m.get("sync") or {}).get("conflicts") or {}
+        conflicts.pop("Opening Prompt", None)
+    update_meta(d, put)
+    (d / "app").mkdir(exist_ok=True)
+    with open(d / "app" / "authorship.jsonl", "a") as fh:
+        fh.write(json.dumps({"at": now_iso(), "field": "Opening Prompt", "event": "pulled_from_studio",
+                             "chars": len(text)}) + "\n")
+    stages.log(d, "studio_pulled", fields=["Opening Prompt"])
+
+
+def _save_prompt_only(d: Path, text: str) -> None:
+    """Save only the opening prompt to Studio. The other fields are left as Studio has them."""
+    meta = workspace.load(d)
+    after = S().patch_fields(meta["task_id"], {PROMPT_FIELD: text})
+    sync.mark_pushed(d, {PROMPT_FIELD: text}, update_meta)
+
+    def put(m):
+        if (m.get("pushed") or {}).get("fields") is not None:
+            m["pushed"]["fields"][PROMPT_FIELD] = sha12(text)
+        conflicts = (m.get("sync") or {}).get("conflicts") or {}
+        conflicts.pop("Opening Prompt", None)
+    update_meta(d, put)
+    save_studio_snapshot(d, after if isinstance(after, dict) else None)
+    stages.log(d, "studio_pushed", fields=[PROMPT_FIELD])
+
+
+def _match_prompt_with_studio(d: Path, log) -> str:
+    """--qc, first step: Studio's edits come in, then the two copies of the opening prompt are made the same
+    without ever saving over text Austin wrote in Studio. Returns the prompt both now hold."""
+    recheck_mine(d)
+    res = pull_from_studio(d)
+    if res["pulled"]:
+        log(f"Brought in from Studio: {', '.join(res['pulled'])}")
+    for k, why in res["conflicts"].items():
+        if k != "Opening Prompt":
+            log(f"  {k}: {why}; left both copies alone")
+    rem = ((studio_snapshot(d) or {}).get("fields") or {}).get(PROMPT_FIELD) or ""
+    loc = _local_prompt(d)
+    if sync.norm(rem) == sync.norm(loc):
+        return loc
+    meta = workspace.load(d)
+    base = {**((meta.get("pushed") or {}).get("fields") or {}), **(meta.get("synced") or {})}.get(PROMPT_FIELD)
+    at_claim = meta.get("studio_at_claim")
+    foreign = base is None and at_claim is not None and sync.h(rem) == at_claim.get(PROMPT_FIELD)
+    if foreign and not sync.norm(loc):
+        raise ActionError("missing_fields", "Studio's opening prompt is a previous writer's text. Write your own "
+                          "first, in Studio or submission.md.", {"fields": ["opening_prompt"]})
+    if not sync.norm(rem) or foreign:
+        how = "Studio had none" if not sync.norm(rem) else "Studio held a previous writer's"
+        log(f"Saving your opening prompt to Studio ({how}).")
+        _save_prompt_only(d, loc)
+        return loc
+    if not sync.norm(loc) or (base is not None and sync.h(loc) == base):
+        log("Took Studio's opening prompt into submission.md (only Studio's copy changed).")
+        _take_studio_prompt(d, rem)
+        return _local_prompt(d)
+    if base is not None and sync.h(rem) == base:
+        log("Saving your opening prompt to Studio (only this copy changed). Other fields are left alone.")
+        _save_prompt_only(d, loc)
+        return loc
+    raise ActionError("sync_conflict", "The opening prompt differs here and in Studio, and it isn't clear which one "
+                      "is newer. Put the version you want in both places, then run "
+                      f"`johto lane {d.name} validate --qc` again.",
+                      {"fields": {"Opening Prompt": {"local": loc, "studio": rem}}})
+
+
+def _log_prompt_dims(dims: list[dict], log) -> None:
+    names = prompt_dimensions()
+    warned = {id(x) for x in prompt_warnings(dims)}
+    for x in sorted((x for x in dims if x.get("dimension") in names), key=lambda x: names.index(x["dimension"])):
+        mark = "warn" if id(x) in warned else "FAIL" if x["status"] == "fail" else x["status"] or "?"
+        log(f"  {mark:5} {x['dimension']}")
+        if x.get("status") == "fail" and x.get("justification"):
+            log(f"        {_one_line(x['justification'])}")
+
+
+def _failed_error(d: Path, failed: list[dict], audit_id: str | None, created_at: str | None) -> ActionError:
+    what = "; ".join(f"{x['dimension']}: {_one_line(x.get('justification') or 'failed')}" for x in failed)
+    return _qc_error(d, "failed", f"AutoQC failed the opening prompt ({_when(created_at)}). {what}. "
+                     "Change the prompt, then {fix}.", audit_id=audit_id,
+                     failed=[{"dimension": x["dimension"], "justification": x.get("justification")} for x in failed])
+
+
+def _run_prompt_qc(d: Path, log) -> dict:
+    """--qc, last step: AutoQC on what Studio holds now; refuse if a prompt dimension fails."""
+    log("Running AutoQC on the opening prompt (a few minutes)...")
+    aid = start_qc(d, "AutoQC", checked=True)
+    if not aid:
+        raise _qc_error(d, "not_started", "Studio didn't start AutoQC. Try {fix} again.")
+    res = poll_qc(d, aid, every=QC_GATE_POLL_S, timeout=QC_GATE_TIMEOUT_S)
+    if res["status"] != "completed":
+        raise _qc_error(d, "unfinished", f"AutoQC didn't finish ({res['status']}"
+                        + (f": {res['failure_reason']}" if res.get("failure_reason") else "") + "). "
+                        f"When it does, `johto lane {d.name} validate` checks it; or run {{fix}} again.", audit_id=aid)
+    _log_prompt_dims(res["dims"], log)
+    failed = prompt_failures(res["dims"])
+    if failed:
+        raise _failed_error(d, failed, aid, (res.get("audit") or {}).get("created_at") or now_iso())
+    return {"audit_id": aid, "dims": res["dims"]}
+
+
+def lane_gate(d: Path, kind: str, *, again: bool = False, qc: bool = False, skip_qc: bool = False,
+              need_prompt: bool = False, log=lambda line: None) -> dict:
+    """The checks before a validation lane. Calibration lanes pass straight through.
+
+    1. Studio's opening prompt must be the one in submission.md (the one the lane gets). With qc, Studio's
+       edits come in first and the prompt alone is saved when only this copy changed.
+    2. No earlier validation run used this prompt, unless again.
+    3. AutoQC has passed this prompt (prompt_qc_status); with qc it runs now, unless the latest audit already
+       passed this exact prompt. skip_qc skips 1 and 3. Only the prompt dimensions count (prompt_failures):
+       empty post-run fields (goal, decision points, notes) never block, and AI Detection, which scores the
+       whole task, blocks only when its justification points at the opening prompt; otherwise it is logged as
+       a warning.
+    With no opening prompt anywhere there is nothing to check: need_prompt (the CLI) refuses, otherwise the
+    lane is set up and the prompt goes in later. Raises ActionError: same_prompt, prompt_qc, sync_conflict,
+    missing_fields. Returns {"checked", "audit_id", "again", "skip_qc"}."""
+    out = {"checked": False, "audit_id": None, "again": again, "skip_qc": skip_qc}
+    if kind != "validate":
+        return out
+    _guard_prompt_overlap(d)   # before anything reaches Studio or the lane
+    if skip_qc:
+        log("warning: starting without the prompt AutoQC check (--skip-qc). If AutoQC later asks for a prompt "
+            "change, you'll need another validation run.")
+        studio_prompt = None
+    elif qc:
+        studio_prompt = _match_prompt_with_studio(d, log)
+    else:
+        studio_prompt = _studio_prompt(d, log)
+    prompt = _local_prompt(d)
+    if not prompt and not (studio_prompt or "").strip():
+        if need_prompt:
+            msg = ("Write the opening prompt first, in Studio or submission.md." if studio_prompt is not None else
+                   f"No opening prompt in submission.md. Write it there, or bring Studio's in with `johto pull {d.name}`.")
+            raise ActionError("missing_fields", msg, {"fields": ["opening_prompt"]})
+        return out
+    if studio_prompt is not None and lanes.prompt_sha(studio_prompt) != lanes.prompt_sha(prompt):
+        raise _qc_error(d, "differs", "Studio's opening prompt isn't the one in submission.md, so AutoQC hasn't "
+                        "checked the prompt this lane would get. {fix} brings Studio's text in (or saves yours if "
+                        "only yours changed), runs AutoQC, and sets up the lane if the prompt passes.")
+    if not again:
+        hits = same_prompt_runs(d, prompt)
+        if hits:
+            raise _same_prompt_error(d, hits)
+    if studio_prompt is None:   # skip_qc, or Studio is off for this copy
+        return out
+    out["checked"] = True
+    st = prompt_qc_status(d, prompt)
+    if qc and st["reason"] != "passed":
+        ran = _run_prompt_qc(d, log)
+        out["audit_id"] = ran["audit_id"]
+        log("The prompt passed AutoQC.")
+        _log_prompt_warnings(ran["dims"], log)
+        return out
+    if qc:
+        log(f"The prompt already passed AutoQC ({_when(st['created_at'])}), so it isn't run again.")
+    if st["reason"] == "failed":
+        raise _failed_error(d, st["failed"], st["audit_id"], st["created_at"])
+    if st["reason"] == "running":
+        raise _qc_error(d, "running", f"AutoQC is running now (started {_when(st['running'])}). When it "
+                        f"finishes, run `johto lane {d.name} validate` again; or {{fix}} waits for a fresh one.")
+    if st["reason"] != "passed":
+        raise _qc_error(d, "stale", "No AutoQC since the opening prompt last changed. {fix} runs it and sets up "
+                        "the lane if the prompt passes.", audit_id=st["audit_id"])
+    log(f"The prompt passed AutoQC ({_when(st['created_at'])}).")
+    _log_prompt_warnings(st.get("dims") or [], log)
+    out["audit_id"] = st["audit_id"]
+    return out
+
+
 # --- submit, unclaim, discard ----------------------------------------------------------------------------
 
 def submit(d: Path) -> None:
-    """Re-read the task (Writing and mine), then Submit for Review."""
+    """Re-read the task (Writing and mine), check that Trajectory Logs holds the submission run's transcript
+    (from that same read), then Submit for Review."""
     meta = workspace.load(d)
-    recheck(meta["task_id"], "Writing")
+    t = recheck(meta["task_id"], "Writing")
+    cf = t.get("custom_fields") if isinstance(t, dict) else None
+    if isinstance(cf, dict):
+        save_studio_snapshot(d, cf)
+        ts = trajectory_state(d, None, meta, cf)
+        if ts["status"] in ("missing", "other_run"):
+            what = ("has no Trajectory Logs upload" if ts["status"] == "missing"
+                    else f"has {' and '.join(ts['other'])}'s transcript in Trajectory Logs, not {ts['run']}'s")
+            raise ActionError("missing_fields", f"Studio {what}. Upload {ts['path'] or 'the transcript'} there, then "
+                              "submit again.", {"fields": [TRAJECTORY_FIELD], "trajectory": ts})
     S().transition(meta["task_id"], config.SUBMIT)
 
     def put(m):
         m["submitted_at"] = now_iso()
         st = m.setdefault("studio", {})
         st.update(status="Awaiting Review", polled_at=now_iso(), times_submitted=int(st.get("times_submitted") or 0) + 1)
-    update_meta(d, put)
+    meta = update_meta(d, put)
+    stages.log(d, "submitted", task_id=meta["task_id"], times=(meta.get("studio") or {}).get("times_submitted"))
 
 
 def unclaim(d: Path) -> None:
@@ -963,7 +1655,7 @@ def discard_link(d: Path, meta: dict, reason: str) -> str:
         if reason == "easy" and not s["follow_ups"]:
             q += [("entry.1167518327", "Solved on the first try (one-shot)"),
                   ("entry.1292663648", "None"), ("entry.1149220368", "It didn't struggle")]
-        q.append(("entry.1910140360", str(round(sum(r.get("active_minutes") or 0 for r in recs)))))
+        q.append(("entry.1910140360", str(round(sum(workspace.run_minutes(r, d) or 0 for r in recs)))))
     return config.DISCARD_FORM + "?" + urllib.parse.urlencode(q)
 
 
@@ -1030,12 +1722,44 @@ def skip_calibration(d: Path) -> None:
 # --- Studio status --------------------------------------------------------------------------------------
 
 def save_studio_snapshot(d: Path, custom_fields: dict | None) -> None:
-    """What Studio holds, for the "as saved" view: tasks/<short>/app/studio-fields.json."""
+    """What Studio holds, for the "as saved" view: tasks/<short>/app/studio-fields.json. A change to any of
+    Austin's fields since the last snapshot also adds a line to app/studio-history.jsonl."""
     if custom_fields is None:
         return
     p = d / "app" / "studio-fields.json"
     p.parent.mkdir(exist_ok=True)
-    _write_json(p, {"at": now_iso(), "fields": custom_fields})
+    at = now_iso()
+    _write_json(p, {"at": at, "fields": custom_fields})
+    _note_studio_change(d, custom_fields, at)
+
+
+def _history_fields() -> tuple[str, ...]:
+    return (*sync.SECTION_FIELDS, *sync.RATING_FIELDS, TRAJECTORY_FIELD)
+
+
+def _note_studio_change(d: Path, cf: dict, at: str) -> None:
+    """app/studio-history.jsonl: {at, fields: {field: sha}, changed: [field]} each time a snapshot of Studio
+    differs from the last line in Austin's fields or the Trajectory Logs upload. focus.py reads the lines as signs
+    that he worked in Studio; `johto where` names the fields that changed. Never raises."""
+    try:
+        shas = {f: sync.h(json.dumps(cf[f], sort_keys=True) if not isinstance(cf[f], str) else cf[f])
+                for f in _history_fields() if cf.get(f) not in (None, "", [])}
+        p = d / "app" / "studio-history.jsonl"
+        last: dict = {}
+        if p.exists():
+            lines = p.read_text().splitlines()
+            if lines:
+                last = json.loads(lines[-1]).get("fields") or {}
+        if shas == last:
+            return
+        changed = sorted(f for f in set(shas) | set(last) if shas.get(f) != last.get(f))
+        line = {"at": at, "fields": shas, "changed": changed}
+        if not p.exists():
+            line["first"] = True    # the first look at Studio: what was there, not an edit
+        with open(p, "a") as fh:
+            fh.write(json.dumps(line) + "\n")
+    except Exception:
+        pass
 
 
 def studio_snapshot(d: Path) -> dict | None:
@@ -1058,6 +1782,8 @@ def studio_status(d: Path) -> dict:
             st["feedback_seen_at"] = None
             if out["feedback"]:
                 st["feedback_at"] = now_iso()   # derive: feedback newer than the last submit = sent back
+        if st.get("status") in ("Awaiting Review", "In Review") and out["status"] == "Writing":
+            st["sent_back_at"] = now_iso()      # Studio moved it from review back to Austin
         st.update(status=out["status"], polled_at=now_iso(), feedback=out["feedback"],
                   times_submitted=out["times_submitted"] if out["times_submitted"] is not None else st.get("times_submitted", 0),
                   mine=out["mine"])
@@ -1074,6 +1800,85 @@ def studio_fields_view(d: Path) -> dict:
     diff = sorted(k for k in set(local) | set(remote or {}) if remote is not None and k in local
                   and str(local.get(k)).strip() != str((remote or {}).get(k)).strip())
     return {"local": local, "studio": remote, "diff": diff, "studio_at": (snap or {}).get("at")}
+
+
+# --- Trajectory Logs ---------------------------------------------------------------------------------------
+# Studio's required upload (docs/rules.md submit-trajectory-logs): the submission run's transcript (.jsonl) in
+# the Trajectory Logs file field. Austin uploads it in Studio; Studio keeps the original file name after its own
+# "file_<id>_" prefix (s3://.../file_<32 hex>_<name>), so the receipt names the run whose transcript it is.
+
+TRAJECTORY_FIELD = "field_trajectory_log_files"
+_STUDIO_FILE_PREFIX = re.compile(r"^file_[0-9a-f]{32}_")
+
+
+def trajectory_files(cf: dict | None) -> list[str]:
+    """The original file names in Studio's Trajectory Logs field."""
+    out = []
+    for x in (cf or {}).get(TRAJECTORY_FIELD) or []:
+        url = x.get("file_s3_url") or x.get("url") or x.get("name") if isinstance(x, dict) else x
+        if isinstance(url, str) and url.strip():
+            out.append(_STUDIO_FILE_PREFIX.sub("", url.rstrip("/").rsplit("/", 1)[-1]))
+    return out
+
+
+def trajectory_state(d: Path, run: str | None = None, meta: dict | None = None, cf: dict | None = None) -> dict:
+    """Does Studio hold the submission run's transcript as a Trajectory Log? `cf` is Studio's custom_fields
+    (a fresh read); without it the last snapshot is used.
+
+    {status, run, want, path, files, other, at}: status is "uploaded" (the run's transcript is there),
+    "other_run" (another run's transcript, named in `other`), "unknown_file" (files johto can't match to a run),
+    "missing" (nothing uploaded) or "no_snapshot" (Studio not read yet)."""
+    meta = meta or workspace.load(d)
+    run, rec = validation_run(d, run)
+    at = None
+    if cf is None:
+        snap = studio_snapshot(d)
+        cf, at = (snap or {}).get("fields"), (snap or {}).get("at")
+    want = Path(rec["transcript"]).name if rec and rec.get("transcript") else None
+    files = trajectory_files(cf)
+    by_name = {Path(r["transcript"]).name: Path(r["dir"]).name for r in meta.get("runs") or []
+               if r.get("transcript") and r.get("dir")}
+    other = sorted({by_name[f] for f in files if f in by_name and by_name[f] != run})
+    if cf is None:
+        status = "no_snapshot"
+    elif not files:
+        status = "missing"
+    elif want and want in files:
+        status = "uploaded"
+    elif other:
+        status = "other_run"
+    else:
+        status = "unknown_file"
+    return {"status": status, "run": run, "want": want, "path": (rec or {}).get("transcript"), "files": files,
+            "other": other, "at": at}
+
+
+def trajectory_row(d: Path, run: str | None = None, meta: dict | None = None) -> dict:
+    """The checklist row for the Trajectory Logs upload. Missing, or another run's transcript, blocks submit."""
+    meta = meta or workspace.load(d)
+    ts = trajectory_state(d, run, meta)
+    url = studio.task_url(meta["task_id"])
+    when = f" (Studio as of {_hhmm(ts['at'])})" if ts.get("at") else ""
+    fix = {"action": "open_studio", "url": url, "path": ts["path"], "then": "studio_refresh"}
+    run = ts["run"]
+    if ts["status"] == "uploaded":
+        return _row("trajectory_logs", "pass", "Trajectory Logs", f"{run}'s transcript is in Studio{when}",
+                    files=ts["files"])
+    if ts["status"] == "no_snapshot":
+        return _row("trajectory_logs", "pending", "Trajectory Logs not checked",
+                    "Refresh from Studio to see whether the transcript is uploaded.",
+                    fix={"action": "studio_refresh", "args": {}})
+    upload = f"Upload {ts['path']} to Trajectory Logs in Studio" if ts["path"] else f"Upload {run}'s transcript"
+    if ts["status"] == "missing":
+        return _row("trajectory_logs", "fail", "Trajectory Logs not uploaded",
+                    f"Studio won't submit without it{when}. {upload}.", fix=fix, files=[])
+    if ts["status"] == "other_run":
+        which = " and ".join(ts["other"])
+        return _row("trajectory_logs", "fail", f"Trajectory Logs hold {which}'s transcript",
+                    f"The submission uses {run}{when}. {upload} and remove the other one.", fix=fix, files=ts["files"])
+    return _row("trajectory_logs", "warn", "Trajectory Logs", f"Studio holds {', '.join(ts['files'])}{when}; johto "
+                f"can't tell which run that is. The submission uses {run} ({ts['want']}).", blocking=False, fix=fix,
+                files=ts["files"])
 
 
 # --- the submit checklist --------------------------------------------------------------------------------
@@ -1109,6 +1914,23 @@ FIELD_LABEL = {"field_opening_prompt": "Opening Prompt", "field_high_level_goal"
                "field_conversation_log": "Conversation Log", "field_final_output": "Final Output",
                "field_repo_name": "Repo name", "field_repo_url": "Repo URL", "field_primary_language": "Language",
                "field_primary_language_other": "Language (other)"}
+
+
+def _lint_view(d: Path, meta: dict, sub: dict) -> dict:
+    """submission.md as lint reads it, with each blank section taken from Studio's saved snapshot (draftcheck's
+    read_draft). A blank local copy of a field Studio holds is not an empty field; local text, which the editor
+    may have changed since the last save, still wins."""
+    try:
+        from . import draftcheck
+        draft = draftcheck.read_draft(d, meta)
+    except Exception:
+        return sub
+    sections = dict(sub.get("sections") or {})
+    for key, (_, heading, _) in draftcheck.TEXT_FIELDS.items():
+        studio = draft["fields"].get(key, {}).get("studio")
+        if studio and not (sections.get(heading) or "").strip():
+            sections[heading] = studio
+    return {**sub, "sections": sections}
 
 
 def checklist(d: Path, run: str | None = None) -> list[dict]:
@@ -1164,6 +1986,16 @@ def checklist(d: Path, run: str | None = None) -> list[dict]:
         else:
             rows.append(_row("studio_sync", "pass", f"Saved to Studio {_hhmm(pushed['at'])}", "no changes since"))
 
+    # What Studio saved: a paste cut off, or less than the local copy. Only a confirmed cut blocks.
+    saved = saved_text_flags(d)
+    if saved:
+        bad = [f for f in saved if f[0] == lint.ERROR]
+        key = (LINT_FIELD | {"Notes for the Reviewer": "reviewer_notes"}).get((bad or saved)[0][1])
+        rows.append(_row("studio_saved", "fail" if bad else "warn", "Studio's saved text",
+                         "; ".join(f"{f[1]}: {f[2]}" for f in saved), blocking=bool(bad),
+                         fix={"action": "focus_field", "field": key, "span": None} if key else None,
+                         flags=[{"level": a, "field": b, "message": c} for a, b, c in saved]))
+
     # Text a previous writer left in Studio (sync never pulls it in; see johto/sync.py).
     fo = (meta.get("sync") or {}).get("foreign") or {}
     fo = {f: why for f, why in fo.items() if not (f in now_fields and why == "empty here")}
@@ -1196,12 +2028,14 @@ def checklist(d: Path, run: str | None = None) -> list[dict]:
     errs = [p for p in probs if p[0] == lint.ERROR]
     warns = [p for p in probs if p[0] == lint.WARN]
     chosen = " (chosen)" if meta.get("submission_run") == vrun and vrun else ""
-    kind, _, n = (vrun or "").partition("-")
-    title = f"{'Calibration' if kind == 'calib' else 'Validation'} {n}" if vrun else "Validation run"
+    waiting = newer_uncollected(meta, d, None) if not vrun else []
+    kind, _, n = (vrun or (waiting[-1] if waiting else "")).partition("-")
+    title = f"{'Calibration' if kind == 'calib' else 'Validation'} {n}" if n else "Validation run"
     if errs:
+        to_collect = vrun if vrun and not (rec or {}).get("transcript") else (waiting[-1] if waiting else None)
         rows.append(_row("validation_run", "fail", f"{title}{chosen}", "; ".join(p[2] for p in errs),
-                         fix={"action": "collect", "args": {"run": vrun}} if vrun and not (rec or {}).get("transcript") else None,
-                         run=vrun))
+                         fix={"action": "collect", "args": {"run": to_collect}} if to_collect else None,
+                         run=vrun or to_collect))
     else:
         try:
             s = transcript.summarize(Path(rec["transcript"]))
@@ -1217,17 +2051,24 @@ def checklist(d: Path, run: str | None = None) -> list[dict]:
         else:
             rows.append(_row("validation_run", "pass", f"{title}{chosen}", detail, run=vrun))
 
-    # Gists
-    g = meta.get("gists") or {}
-    if g.get("conversation_log") and g.get("final_output") and (not g.get("run") or g["run"] == vrun):
-        rows.append(_row("gists", "pass", "Gists", f"conversation log, final diff (secret, {gists.GH_ACCOUNT})"))
-    elif pushed.get("at") or (g.get("run") and g["run"] != vrun):
-        why = f"they are for {g['run']}; Save to Studio uploads {vrun}'s" if g.get("run") and g["run"] != vrun \
-            else "Save to Studio uploads them"
-        rows.append(_row("gists", "pending", "Gists not uploaded", why, fix={"action": "studio_save", "args": {}}))
+    # Trajectory Logs: the upload Studio requires (its own file field, separate from the gist links).
+    if vrun:
+        rows.append(trajectory_row(d, vrun, meta))
 
-    # Local lint (rating flags have their own row)
-    flags = [f for f in lint.run_all(meta, sub) if f[1] != "Ratings"]
+    # Gists: links in Conversation Log / Final Output. Studio's current form doesn't require them (accepted
+    # tasks went through without), so this row never blocks; Save to Studio keeps them current.
+    gs = gist_state(d, run, meta) if vrun else None
+    g = meta.get("gists") or {}
+    if gs and not gs["need"]:
+        rows.append(_row("gists", "pass", "Gists", f"conversation log, final diff (secret, {gists.GH_ACCOUNT})"))
+    elif gs and (pushed.get("at") or g.get("conversation_log") or g.get("final_output")):
+        whys = sorted(set(gs["why"].values()))
+        title = "Gists out of date" if g.get("conversation_log") or g.get("final_output") else "Gists not uploaded"
+        rows.append(_row("gists", "pending", title, "; ".join(whys).capitalize() + f". Save to Studio uploads {vrun}'s.",
+                         blocking=False, fix={"action": "studio_save", "args": {}}, need=gs["need"]))
+
+    # Local lint (rating flags have their own row), with blank local sections read from Studio's saved copy
+    flags = [f for f in lint.run_all(meta, _lint_view(d, meta, sub)) if f[1] != "Ratings"]
     le = [f for f in flags if f[0] == lint.ERROR]
     lw = [f for f in flags if f[0] == lint.WARN]
     flag_dicts = [{"level": a, "field": b, "message": c, "field_key": LINT_FIELD.get(b)} for a, b, c in flags]

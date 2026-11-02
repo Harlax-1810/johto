@@ -124,6 +124,13 @@ def _default_setup(d: Path, kind: str, log: Callable[[str], None]) -> Path:
     return actions.start_lane(d, kind, log=log)
 
 
+def _default_gate(d: Path, kind: str) -> None:
+    """The prompt checks a new validation lane must pass (same prompt as an earlier run, AutoQC); setup runs
+    them again. Raises actions.ActionError."""
+    from ... import actions
+    actions.lane_gate(d, kind)
+
+
 def _default_ghostty(argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.run(argv, capture_output=True, text=True, timeout=20)
 
@@ -172,7 +179,8 @@ class LaneService:
         self.nav_clients: set[Client] = set()      # sockets that can navigate the page (caps: navigate)
         self.unlocked: set[tuple[str, str]] = set()
         self._auto_override: bool | None = None
-        self.setup: Callable = _default_setup       # tests replace these two
+        self.setup: Callable = _default_setup       # tests replace these
+        self.gate: Callable = _default_gate
         self.open_ghostty: Callable = _default_ghostty
         self._listeners: list[Callable[[str, dict], None]] = []
         self._state: dict = self._blank()
@@ -427,7 +435,7 @@ class LaneService:
         if not red or not s or not info:
             return None
         meta = info["meta"]
-        others = sum((r.get("active_minutes") or 0) for r in meta.get("runs", [])
+        others = sum((workspace.run_minutes(r, info.get("task_dir")) or 0) for r in meta.get("runs", [])
                      if r.get("dir") != f"runs/{info['run']}")
         ws = (p.get("paths") or {}).get("workspace") or ""
         files = [f[len(ws):].lstrip("/") if ws and f.startswith(ws) else f for f in red.files]
@@ -533,7 +541,7 @@ class LaneService:
                "foreign": {"container": p["foreign"][0]} if p.get("foreign") else None,
                "launchable": launchable, "session": bool(look.get("session")),
                "input": ({"visible": scr["input_visible"], "empty": not scr["input_text"]} if scr else None),
-               "job": prep}
+               "job": prep, "monitor": self._monitor(info)}
         old = self._state
         self._state = new
         if json.dumps(old, sort_keys=True, default=str) != json.dumps(new, sort_keys=True, default=str):
@@ -546,6 +554,20 @@ class LaneService:
             self._pub_due = False
             self._changed()                  # facts held back by the once-a-second limit
         self._maybe_auto_prepare(new)
+
+    @staticmethod
+    def _monitor(info: dict | None) -> dict | None:
+        """The run monitor (runmon) for the lane's run, from its cache: never measured here, so a probe never
+        waits on it. None until the run monitor's thread runs."""
+        if not info:
+            return None
+        try:
+            from . import runmon
+            if not runmon.running():
+                return None
+            return runmon.public(runmon.get(info["task_dir"], info["run"], up=True))
+        except Exception:
+            return None
 
     @staticmethod
     def _log_event(st: dict) -> None:
@@ -775,6 +797,19 @@ class LaneService:
             raise LaneError(409, "lane_busy", f"A lane container this app doesn't know ({p['foreign'][0]}) holds "
                             "the lane ports. Stop it in Docker first.", {"foreign": {"container": p["foreign"][0]}})
         reuse, uncollected, idle = await asyncio.to_thread(self._plan, p, short, kind)
+        try:
+            if not reuse:
+                # Refuse on the prompt checks before anything is collected or stopped.
+                await asyncio.to_thread(self.gate, d, kind)
+            elif kind == "validate":
+                # A prepared lane passed the gate at setup; the prompt may have changed since, and it reaches
+                # Claude only in his own words.
+                from ... import actions
+                await asyncio.to_thread(actions._guard_prompt_overlap, d)
+        except Exception as e:
+            if type(e).__name__ != "ActionError":
+                raise
+            raise LaneError(e.status, e.code, e.message, e.details) from None
         word = "calibration" if kind == "calib" else "validation"
         steps = (["Collecting the last run"] if uncollected else []) + (["Stopping the idle lane"] if idle else []) \
             + ([] if reuse else [f"Setting up {word}"]) + ["Starting Claude"]

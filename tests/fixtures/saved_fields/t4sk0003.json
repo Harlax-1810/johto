@@ -1,0 +1,9 @@
+{
+  "at": "2026-03-10T09:00:37-0700",
+  "fields": {
+    "field_opening_prompt": "What could go wrong if we rename a project while its build is running?",
+    "field_high_level_goal": "The answer names the risks of a rename during a build, and a grader can score it against each one.",
+    "field_codebase_overview": "A service with a queue, a cache and a small admin panel. Renames touch all three, and only the panel has tests.",
+    "field_self_check": "Claude named the cache risk and the queue risk correctly. It treated the admin panel as safe, which it is not.\n\nI asked about risks because I wanted to know what happens when I ship the second half it fo"
+  }
+}

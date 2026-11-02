@@ -176,7 +176,7 @@ class ReducerTests(unittest.TestCase):
         self.assertEqual(s["human_turns"], 2)
 
     def test_django_test_runner_counts_as_a_test_command(self):
-        for cmd in ("$SP/venv/bin/python manage.py test --settings cvat.settings.testing cvat.apps.x",
+        for cmd in ("$SP/venv/bin/python manage.py test --settings vidlabel.settings.ci vidlabel.loans",
                     "python3 manage.py test"):
             self.assertTrue(transcript.TEST_CMD.search(cmd), cmd)
         self.assertFalse(transcript.TEST_CMD.search("python manage.py migrate"))

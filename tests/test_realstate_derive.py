@@ -208,6 +208,10 @@ class PureRules(unittest.TestCase):
         self.assertEqual(derive.stage(t)["stage"], "sent_back")
         t["meta"]["studio"]["status"] = "Awaiting Review"
         self.assertEqual(derive.stage(t)["stage"], "in_review")
+        self.assertFalse(derive.stage(t)["checked"])                  # since is the submit time
+        del t["meta"]["submitted_at"]
+        s = derive.stage(t)
+        self.assertEqual((s["since"], s["checked"]), ("2026-10-30T10:00:00-0700", True))   # only Studio's poll
 
     def test_lane_owner_wins(self):
         t = {"short": "x", "meta": {}, "slot": {}, "texts": {}, "runs": [], "jobs": [],

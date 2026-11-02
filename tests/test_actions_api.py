@@ -183,7 +183,18 @@ class FullFlow(Base):
 
         st, res = call("GET", f"/api/tasks/{short}/checklist")
         rows = {r["key"]: r for r in res["rows"]}
-        for k in ("autoqc", "studio_sync", "ratings", "validation_run", "gists"):
+        self.assertEqual(rows["trajectory_logs"]["status"], "fail")    # Studio won't submit without it
+        self.assertFalse(res["ready"])
+        # Austin uploads the run's transcript to Trajectory Logs in Studio; the refresh reads it back.
+        fake.patch_fields(meta["task_id"], {"field_trajectory_log_files": [
+            {"file_s3_url": f"s3://bucket/file_{'b' * 32}_{Path(rec['transcript']).name}"}]})
+        st, res = call("POST", f"/api/tasks/{short}/studio/refresh", {})
+        self.assertIn(st, (200, 202), res)
+        if st == 202:
+            done(res["job"])
+        st, res = call("GET", f"/api/tasks/{short}/checklist")
+        rows = {r["key"]: r for r in res["rows"]}
+        for k in ("autoqc", "studio_sync", "ratings", "validation_run", "gists", "trajectory_logs"):
             self.assertIn(rows[k]["status"], ("pass", "warn"), rows[k])
         self.assertTrue(res["ready"], res["rows"])
 

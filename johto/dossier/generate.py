@@ -393,11 +393,51 @@ def output_rules(entry: dict, did: str, rec: dict | None = None) -> str:
     ])
 
 
+FOCUS_STYLE = {
+    "Casual prose": "a short casual message from the engineer, about 20 to 60 words",
+    "Explicit spec": "a fuller written spec",
+    "Error / artifact brief": "a pasted error or file with a short note",
+}
+FOCUS_MODE = {
+    "Async/autonomous": "Claude works alone until it is done, with no replies from the engineer",
+    "Interactive/pairing": "the engineer answers Claude while it works",
+}
+
+
+def focus_section(entry: dict) -> str | None:
+    """The slot groups this research was started for, or None. Each focus is "Action|Domain|Codebase type" and
+    may add "|Prompt style|Interaction mode"."""
+    rows = []
+    for f in entry.get("focus") or []:
+        parts = [p.strip() for p in str(f).split("|")]
+        if len(parts) < 3:
+            continue
+        how = []
+        if len(parts) > 3 and parts[3] in FOCUS_STYLE:
+            how.append(f"written as {FOCUS_STYLE[parts[3]]}")
+        if len(parts) > 4 and parts[4] in FOCUS_MODE:
+            how.append(FOCUS_MODE[parts[4]])
+        rows.append(f"- {parts[0]} | {parts[1]} | {parts[2]}" + (f" ({'; '.join(how)})" if how else ""))
+    if not rows:
+        return None
+    return ("## Open slots this research is for\n\n"
+            "The engineer has open slots of these kinds and few good problems for them. Besides covering the "
+            "project as usual, find at least two opportunities for each slot below whose `slot_fit` names exactly "
+            "that action, domain and codebase type, and that really are that kind of task (an Operate opportunity "
+            "is about running, configuring or diagnosing the system; an Understand / Assess one has ground truth a "
+            "reviewer can check). When a slot's task is a short casual message run without replies, prefer problems "
+            "a user could state in a few plain sentences and whose finished state can be checked at the end of one "
+            "unattended session. If the project has no honest opportunity for a slot, say so in a `callout` block "
+            "instead of forcing one.\n\n" + "\n".join(rows))
+
+
 def build_prompt(entry: dict, rec: dict, did: str) -> str:
+    focus = focus_section(entry)
     return "\n\n".join([
         PROMPT,
         "## The dossier schema (johto.dossier/1)\n\n" + SCHEMA,
         "## Repository facts\n\n" + repo_facts(entry, rec, did),
+        *([focus] if focus else []),
         "## Output\n\n" + output_rules(entry, did, rec),
     ])
 

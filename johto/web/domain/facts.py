@@ -15,6 +15,16 @@ from pathlib import Path
 from ... import transcript as tx
 
 TEST_CMD = tx.TEST_CMD
+
+
+def is_test(cmd: str) -> bool:
+    """A shell line that runs a test runner. grading.runs_tests reads each segment's program, so a formatter run
+    on a tests/ path doesn't count and `npx mocha` does; transcript.TEST_CMD is the fallback."""
+    try:
+        from ...grading import runs_tests
+    except ImportError:
+        return bool(TEST_CMD.search(cmd or ""))
+    return runs_tests(cmd or "")
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 TEST_PATH = re.compile(r"(^|/)(tests?|__tests__|spec|specs)/|[._-](test|spec)\.[a-z]+$|_test\.go$|(^|/)test_[^/]+\.py$", re.I)
 PASS_CLAIM = re.compile(r"\b(all (the )?tests (now )?pass(ed|ing)?|tests (are )?(now )?(all )?pass(ing|ed)?|"
@@ -115,8 +125,9 @@ def reduce(es: list[dict], workspace: str | None = None) -> dict:
                     if path and not path.startswith("/"):  # Claude's scratch files outside the repo don't count
                         edits.append({"i": i, "turn": turn, "path": path})
                 cmd = inp.get("command") if u["name"] == "Bash" else None
-                if isinstance(cmd, str) and TEST_CMD.search(cmd):
-                    t = {"i": i, "turn": turn, "cmd": cmd.strip()[:200], "ok": None}
+                if isinstance(cmd, str) and is_test(cmd):
+                    t = {"i": i, "turn": turn, "cmd": cmd.strip()[:200], "ok": None,
+                         "piped": bool(re.search(r"(?<!\|)\|(?!\|)", cmd))}
                     u["test"] = t
                     tests.append(t)
             elif e.get("type") == "assistant" and x.get("type") == "text" and x.get("text", "").strip():
@@ -127,9 +138,16 @@ def reduce(es: list[dict], workspace: str | None = None) -> dict:
                     continue
                 u["is_error"] = bool(x.get("is_error"))
                 if u.get("test") is not None:
-                    text = _result_text(x.get("content"))
+                    from ... import grading
+                    t, text = u["test"], _result_text(x.get("content"))
                     m = re.search(r"Exit code (\d+)", text[:200])
-                    u["test"]["ok"] = not (u["is_error"] or (m and m.group(1) != "0"))
+                    t["seen"], t["failed_output"] = True, grading.output_failure(text)
+                    if u["is_error"] or (m and m.group(1) != "0") or t["failed_output"]:
+                        t["ok"] = False
+                    elif t["piped"]:
+                        t["ok"] = None   # exit 0 is the pipe's last command (`| tail`), not the test runner's
+                    else:
+                        t["ok"] = True
     return {"uses": uses, "edits": edits, "tests": tests, "turns": turn, "last_text": last_text,
             "last_text_i": last_text_i}
 
@@ -182,7 +200,7 @@ def run_facts(tpath: Path | str | None, *, diff_text: str | None = None, transcr
         return None
     red = _cached("reduce", Path(tpath), lambda p: reduce(entries(p), workspace))
     tests = red["tests"]
-    done = [t for t in tests if t["ok"] is not None]
+    done = [t for t in tests if t.get("seen")]   # a result came back (ok None: hidden by a pipe)
     last = done[-1] if done else None
     last_edit = red["edits"][-1]["i"] if red["edits"] else None
     files = []
@@ -203,7 +221,8 @@ def run_facts(tpath: Path | str | None, *, diff_text: str | None = None, transcr
         "files_edited": files,
         "tests": {"runs": len(tests), "last_ok": last["ok"] if last else None,
                   "last_cmd": (last or (tests[-1] if tests else {})).get("cmd"),
-                  "after_last_edit": (last["i"] > last_edit) if (last and last_edit is not None) else (True if last else None)},
+                  "after_last_edit": (last["i"] > last_edit) if (last and last_edit is not None) else (True if last else None),
+                  "last_hidden": bool(last and last["ok"] is None), "last_failed_output": (last or {}).get("failed_output")},
         "transcripts": transcripts, "model_ok": model_ok, "effort_ok": effort_ok,
         "model_problems": probs,
         "diffstat": diffstat(diff_text), "first_prompt_matches": first_match,
@@ -241,11 +260,10 @@ def moments(f: dict | None, *, kind: str, slot: dict) -> list[dict]:
 
     act = f.get("active_min") or 0
     turns = f.get("turns") or 0
-    if turns <= 1 and act < 10:
-        who = "async" if mode_async else "interactive"
-        add("speed", "warn", f"{turns} turn, {_num(act)} active min: reviewers drop {who} tasks Opus finishes in about 5 minutes")
-    elif act < 5:
-        add("speed", "warn", f"{_num(act)} active min: reviewers drop tasks Opus finishes in about 5 minutes")
+    if (turns <= 1 and act < 10) or act < 5:
+        # A fact about minutes, not a verdict: short runs with real misses have been accepted.
+        add("speed", "warn", f"Claude worked {_num(act)} min over {turns} turn{'s' if turns != 1 else ''}. Reviewers "
+            "have dropped tasks Opus finishes in about 5 minutes; short runs with real misses have passed.")
     elif enterprise and kind == "calib" and act >= 30:
         add("speed", "ok", f"{_num(act)} active min, past the 30-minute Enterprise bar")
     t = f.get("tests") or {}
@@ -253,7 +271,10 @@ def moments(f: dict | None, *, kind: str, slot: dict) -> list[dict]:
     if not t.get("runs"):
         add("tests", "warn", "no test command ran")
     elif t.get("last_ok") is False:
-        add("tests", "warn", f"the last test run failed: {cmd}")
+        how = f" (its output: {t['last_failed_output']})" if t.get("last_failed_output") else ""
+        add("tests", "warn", f"the last test run failed: {cmd}{how}")
+    elif t.get("last_hidden"):
+        add("tests", "warn", f"the last test run's result is unknown: exit 0 (piped), {cmd}")
     elif t.get("last_ok") and t.get("after_last_edit"):
         add("tests", "ok", f"{cmd} passed after the last edit")
     elif t.get("last_ok") and t.get("after_last_edit") is False:
@@ -293,9 +314,9 @@ def _short_cmd(cmd: str | None) -> str:
     if not cmd:
         return "tests"
     for seg in re.split(r"\s*(?:;|&&|\|\||\|)\s*", cmd.strip().splitlines()[0]):
-        if TEST_CMD.search(seg):
+        if is_test(seg):
             return re.sub(r"\s*\d*>{1,2}&?\s*\S+", "", seg).strip()[:60]
-    return cmd.strip().splitlines()[0][:60]
+    return "tests"   # the runner is past the stored 200 characters; a slice of the line would read as nonsense
 
 
 # --- keep or drop -----------------------------------------------------------------------------------------

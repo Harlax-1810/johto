@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  johto watch as a LaunchAgent: packs and sends each finished lane turn to GPT Pro, saves replies, nudges on
+  Claude minutes. Template only; to install:
+    cp tools/local.johto.watch.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.johto.watch.plist
+  Stop: launchctl bootout gui/$(id -u)/local.johto.watch
+  One watcher at a time (data/turnwatch.lock), so a second copy exits at once and KeepAlive retries it later.
+  PATH covers docker (/usr/local/bin), ssh, osascript, terminal-notifier (Homebrew) and browser-harness (~/.local/bin).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>local.johto.watch</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/path/to/johto/.venv/bin/python</string>
+    <string>-m</string>
+    <string>johto.cli</string>
+    <string>watch</string>
+  </array>
+  <key>WorkingDirectory</key>
+  <string>/path/to/johto</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/YOU/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>30</integer>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>/path/to/johto/data/turnwatch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/path/to/johto/data/turnwatch.log</string>
+</dict>
+</plist>

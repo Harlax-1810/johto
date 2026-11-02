@@ -1,6 +1,14 @@
-"""Pre-work lanes: one new folder per run under tasks/<short>/runs/, via the vendor prework.py."""
+"""Pre-work lanes: one new folder per run under tasks/<short>/runs/, via the vendor prework.py.
+
+Each run's entry in task.json records the opening prompt it started with (prompt_sha, prompt_head), so the
+same-prompt check in johto.actions can tell when a new validation run would repeat an earlier one. Every
+collect, from the CLI, the web app or the lane watcher, ends in after_collect(): a "collected" event and the
+writing kit (johto.kit) when that module exists.
+"""
 from __future__ import annotations
 
+import hashlib
+import importlib
 import json
 import os
 import re
@@ -132,6 +140,24 @@ def lane_key(container: str | None) -> str | None:
     return None
 
 
+PROMPT_HEAD = 200
+
+
+def prompt_sha(text: str | None) -> str:
+    """sha12 of the opening prompt with every run of whitespace made one space: the same prompt pasted with
+    other line breaks or trailing spaces gets the same sha."""
+    return hashlib.sha1(" ".join((text or "").split()).encode()).hexdigest()[:12]
+
+
+def prompt_record(task_dir: Path) -> dict:
+    """{"prompt_sha", "prompt_head"} for the Opening Prompt in submission.md now; {} when there is none."""
+    try:
+        p = workspace.parse_submission(task_dir)["sections"].get("Opening Prompt", "").strip()
+    except OSError:
+        return {}
+    return {"prompt_sha": prompt_sha(p), "prompt_head": p[:PROMPT_HEAD]} if p else {}
+
+
 def manifest(run_dir: Path) -> dict:
     p = Path(run_dir) / "prework-manifest.json"
     return json.loads(p.read_text()) if p.exists() else {}
@@ -174,6 +200,7 @@ def new_lane(task_dir: Path, kind: str, stop_others: bool = False) -> Path:
         raise ValueError(f"kind must be one of {KINDS}")
     _guard_real(None, "prework setup")
     meta = workspace.load(task_dir)
+    started_with = prompt_record(task_dir)   # the prompt as it is now, before setup's few seconds
     slot = _pick_slot(stop_others)
     run_dir = next_run_dir(task_dir, kind)
     run_dir.mkdir(parents=True)
@@ -195,12 +222,14 @@ def new_lane(task_dir: Path, kind: str, stop_others: bool = False) -> Path:
         "kind": kind, "dir": str(run_dir.relative_to(task_dir)),
         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "container": manifest(run_dir).get("lane", {}).get("container"),
+        **started_with,
     }
     if slot:
         rec["port_slot"] = slot
-    meta = workspace.load(task_dir)  # setup took minutes; don't write back a task.json read before it
-    meta.setdefault("runs", []).append(rec)
-    workspace.save(task_dir, meta)
+    with workspace.locked(task_dir):   # other writers (web ratings, the lane watcher) save task.json too
+        meta = workspace.load(task_dir)  # setup took minutes; don't write back a task.json read before it
+        meta.setdefault("runs", []).append(rec)
+        workspace.save(task_dir, meta)
     return run_dir
 
 
@@ -246,18 +275,57 @@ def collect(task_dir: Path, run_name: str) -> dict:
     info = {"diff": str(diff) if diff.exists() else None,
             "diff_bytes": diff.stat().st_size if diff.exists() else 0,
             "transcript": str(logs[-1]) if logs else None, "summary": summary}
-    meta = workspace.load(task_dir)
-    for run in meta.get("runs", []):
-        if run["dir"] == f"runs/{run_name}":
-            run["collected_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-            run["diff"], run["transcript"] = info["diff"], info["transcript"]
-            if summary:
-                run["active_minutes"] = summary["active_minutes"]
-                run["human_turns"] = summary["human_turns"]
-    workspace.save(task_dir, meta)
+    with workspace.locked(task_dir):
+        meta = workspace.load(task_dir)
+        for run in meta.get("runs", []):
+            if run["dir"] == f"runs/{run_name}":
+                run["collected_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                run["diff"], run["transcript"] = info["diff"], info["transcript"]
+                if summary:
+                    run["active_minutes"] = summary["active_minutes"]
+                    run["working_minutes"] = summary.get("working_minutes", summary["active_minutes"])
+                    run["human_turns"] = summary["human_turns"]
+        workspace.save(task_dir, meta)
     if summary:
         (run_dir / "summary.md").write_text(f"# {run_name} summary\n\n" + transcript.render(summary) + "\n")
+    info["after"] = after_collect(task_dir, run_name, summary)
     return info
+
+
+def after_collect(task_dir: Path, run_name: str, summary: dict | None) -> dict:
+    """What follows every collect: a "collected" event, then the writing kit. Never raises. {"kit": path|None}"""
+    from . import stages
+    s = summary or {}
+    stages.log(task_dir, "collected", run=run_name, working_minutes=s.get("working_minutes", s.get("active_minutes")),
+               turns=s.get("human_turns"))
+    return {"kit": write_kit(task_dir, run_name)}
+
+
+def write_kit(task_dir: Path, run_name: str) -> str | None:
+    """kit.write for the submission run (actions.submission_run), not the run just collected: collecting a stray
+    run must not replace the kit Austin writes from. A missing module is skipped quietly; any other failure
+    prints one warning line and the collect still succeeds."""
+    from . import stages
+    name = f"{__package__}.kit"
+    try:
+        kit = importlib.import_module(name)
+    except ModuleNotFoundError as e:
+        if e.name == name:
+            return None
+        print(f"warning: the writing kit didn't load: {e}")
+        return None
+    except Exception as e:
+        print(f"warning: the writing kit didn't load: {e}")
+        return None
+    before = stages.last(task_dir, "kit_written")
+    try:
+        out = kit.write(task_dir, None)   # None: the submission run
+    except Exception as e:
+        print(f"warning: writing the kit for {run_name} failed: {e}")
+        return None
+    if stages.last(task_dir, "kit_written") == before:   # kit.write logs it itself; log once either way
+        stages.log(task_dir, "kit_written", run=run_name, path=str(out) if out else None)
+    return str(out) if out else None
 
 
 def latest_run(task_dir: Path, kind: str) -> str | None:

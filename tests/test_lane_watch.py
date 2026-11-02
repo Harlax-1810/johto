@@ -1,5 +1,6 @@
 """lane_watch: collect once Claude has exited and the transcript is quiet; skip a lane where only /login ran;
-one collect at a time per run; phases reach listeners; the open hook gets the first chance at the page."""
+one collect at a time per run; phases reach listeners; the open hook gets the first chance at the page; the pack
+is delta.next_pack's (no outside review unless settings say so), or the one already made for that checkpoint."""
 import json
 import os
 import shutil
@@ -10,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from johto import config, workspace
+from johto import config, delta, workspace
 from johto.web import api_pack, lane_watch
 from johto.web.lane import monitor
 
@@ -55,8 +56,10 @@ class WatchTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(lane_watch, "_lanes", lambda: L()),
             mock.patch.object(monitor, "running_containers", lambda: [self.container]),
-            mock.patch.object(api_pack, "_start", lambda short, run, ai=True: {"state": "done", "out": "/x/pack.xml"}),
+            mock.patch.object(delta, "checkpoint_packed", lambda d, run: self.packed),
+            mock.patch.object(delta, "next_pack", self.next_pack),
         ]
+        self.packed, self.built, self.build_error = None, [], None
         for p in self.patches:
             p.start()
 
@@ -68,6 +71,13 @@ class WatchTests(unittest.TestCase):
         monitor.PREFIX = self.saved_prefix
         lane_watch.STATE.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def next_pack(self, d, run=None, log=print, **kw):
+        self.built.append((Path(d).name, run, kw))
+        log("Pack: /x/pack.xml (1,000 tokens)")
+        if self.build_error:
+            raise SystemExit(self.build_error)
+        return Path("/x/pack.xml")
 
     def transcript(self, text: str, age_s: float = 60) -> Path:
         p = self.proj / "s.jsonl"
@@ -105,6 +115,39 @@ class WatchTests(unittest.TestCase):
         with mock.patch.object(monitor, "claude_alive", return_value=False):
             self.tick_and_wait()
         self.assertEqual(len(self.collected), 1)
+
+    def test_the_pack_is_the_next_one_with_no_outside_review_forced(self):
+        before = set(api_pack.JOBS)
+        out = lane_watch.collect_run(self.d, "calib-1", pack=True)
+        self.assertEqual((out["phase"], out["pack"]), ("done", "/x/pack.xml"))
+        self.assertEqual(self.built, [("zz09", "calib-1", {})])   # ai is left to settings pack_outside_review
+        job = next(api_pack.JOBS[j] for j in set(api_pack.JOBS) - before)
+        self.assertEqual((job["state"], job["out"], job["log"]), ("done", "/x/pack.xml", ["Pack: /x/pack.xml (1,000 tokens)"]))
+
+    def test_a_checkpoint_already_packed_is_not_packed_again(self):
+        self.packed = {"path": "/x/review-followup-1.xml"}
+        out = lane_watch.collect_run(self.d, "calib-1", pack=True)
+        self.assertEqual((out["phase"], out["pack"]), ("done", "/x/review-followup-1.xml"))
+        self.assertEqual(self.built, [])
+        self.assertEqual(workspace.load(self.d)["runs"][0]["auto"]["pack"], "/x/review-followup-1.xml")
+
+    def test_a_pack_job_already_running_is_waited_on(self):
+        job = {"id": "j1", "short": "zz09", "run": "calib-1", "state": "running", "out": None, "error": None,
+               "_done": threading.Event()}
+        api_pack.JOBS["j1"] = job
+        try:
+            threading.Timer(0.2, lambda: (job.update(state="done", out="/x/by-hand.xml"), job["_done"].set())).start()
+            out = lane_watch.collect_run(self.d, "calib-1", pack=True)
+        finally:
+            api_pack.JOBS.pop("j1", None)
+        self.assertEqual(out["pack"], "/x/by-hand.xml")
+        self.assertEqual(self.built, [])
+
+    def test_a_failed_pack_is_a_phase(self):
+        self.build_error = "Couldn't clone acme/widget, so no pack was made: boom"
+        out = lane_watch.collect_run(self.d, "calib-1", pack=True)
+        self.assertEqual(out["phase"], "failed")
+        self.assertIn("Couldn't clone", out["message"])
 
     def test_waits_while_claude_runs_or_the_transcript_moves(self):
         self.transcript(jl(HUMAN, CLAUDE))
@@ -226,5 +269,5 @@ class NotifyTests(unittest.TestCase):
             self.assertEqual(self.run.call_count, 1)
 
     def test_summary_plurals(self):
-        self.assertEqual(lane_watch._summary_line({"follow_ups": ["a"], "active_minutes": 3.5}), "1 follow-up, 3.5 active minutes")
-        self.assertEqual(lane_watch._summary_line({"follow_ups": [], "active_minutes": 1}), "0 follow-ups, 1 active minute")
+        self.assertEqual(lane_watch._summary_line({"follow_ups": ["a"], "active_minutes": 3.5}), "1 follow-up, 3.5 working minutes")
+        self.assertEqual(lane_watch._summary_line({"follow_ups": [], "active_minutes": 1}), "0 follow-ups, 1 working minute")

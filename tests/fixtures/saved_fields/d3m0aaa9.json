@@ -1,0 +1,9 @@
+{
+  "at": "2026-03-10T09:00:37-0700",
+  "fields": {
+    "field_opening_prompt": "Our nightly export has been dropping rows for a few customers. Can you find out why and fix it?",
+    "field_high_level_goal": "Every row reaches the export file exactly once, through both the button and the nightly job. A change to only one of them does not count.",
+    "field_codebase_overview": "A small web app with a job runner and a shared storage layer. The export code lives in two places that look alike and drift apart over time.",
+    "field_rationale_difficulty": "The bug shows only above five hundred rows, because the first batch hides the drift. Reading one entry point gives a plausible answer that fails on the other."
+  }
+}

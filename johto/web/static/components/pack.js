@@ -38,7 +38,7 @@ export function PackButton({ short, run, sm = true }) {
 
   async function start() {
     try {
-      const { job: j } = await api.send("POST", `/api/tasks/${short}/runs/${run}/pack`, { ai: true });
+      const { job: j } = await api.send("POST", `/api/tasks/${short}/runs/${run}/pack`, {});   // outside review: settings pack_outside_review
       setJob(j); poll(j.id);
     } catch (e) { toast(e.message, { level: "error" }); }
   }

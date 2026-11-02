@@ -31,10 +31,11 @@ STATUS_IDS = {
     "Accepted": config.STATUS["accepted"],
     "Rejected": config.STATUS["rejected"],
 }
+# What Submit for Review needs. Studio's current form doesn't require the gist link fields (accepted tasks went
+# through without them); its Trajectory Logs upload is checked by johto (actions.trajectory_state), not here.
 REQUIRED = ("field_repo_name", "field_repo_url", "field_primary_language", "field_opening_prompt",
             "field_high_level_goal", "field_rationale_difficulty", "field_codebase_overview",
-            "field_self_check", "field_one_shot", "field_task_success", "field_conversation_log",
-            "field_final_output")
+            "field_self_check", "field_one_shot", "field_task_success")
 EDGES = {  # status -> [(transition name, next status, needs ownership)]
     "Ready to Claim": [(config.CLAIM, "Writing", False)],
     "Writing": [(config.SUBMIT, "Awaiting Review", True), (config.UNCLAIM, "Ready to Claim", True)],

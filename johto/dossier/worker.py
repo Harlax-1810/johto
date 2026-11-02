@@ -10,6 +10,10 @@ process go back to 'queued' when a worker starts.
 
 Several generations never overlap: whoever holds store.generation_lock is the one generating, across
 the web server's thread and `johto dossier ...` processes.
+
+Repo briefs (johto/dossier/brief.py) ride on the same loop and lock: a dossier written ready queues its brief,
+the worker's start queues briefs for ready dossiers with none or a stale one, and each step runs one queued
+brief before the next dossier (a brief takes minutes, a dossier most of an hour). Pause stops both.
 """
 from __future__ import annotations
 
@@ -20,6 +24,20 @@ import traceback
 from typing import Callable
 
 from . import candidates, generate, store
+
+
+def _brief():
+    from . import brief   # late: brief imports generate and store, like this module
+    return brief
+
+
+def queue_brief(did: str, reason: str = "") -> bool:
+    """Queue the repo brief for a dossier (never raises: a brief must not break the dossier worker)."""
+    try:
+        return _brief().queue(did, reason=reason)
+    except Exception:
+        traceback.print_exc()
+        return False
 
 POLL_S = 60
 FILL_EVERY_S = 600
@@ -36,7 +54,8 @@ def _entry(it: dict) -> dict:
     return {"full_name": it["repo"], "display_name": it.get("display_name") or it["repo"],
             "commit": it["commit"], "pinned_url": it.get("pinned_url"),
             "language": it.get("language"), "promise": it.get("promise"),
-            "reasons": it.get("promise_reasons") or [], "fits": it.get("fits") or []}
+            "reasons": it.get("promise_reasons") or [], "fits": it.get("fits") or [],
+            "focus": it.get("focus") or []}
 
 
 def _from_pool(it: dict, rank: int, p: dict) -> None:
@@ -136,6 +155,27 @@ def _watch(did: str, cancel: generate.Cancel, done: threading.Event) -> None:
             return
 
 
+def queue_manual(entry: dict) -> str:
+    """Queue one repo by hand (a candidates entry, maybe with "focus") and return its id. The caller holds
+    store.generation_lock, so no worker can start this item (or any other) before the caller runs it."""
+    did = store.make_id(entry["full_name"], entry["commit"])
+    with store.edit() as idx:
+        it = store.find(idx, did)
+        if it is None:
+            old = store.find_repo(idx, entry["full_name"])
+            if old is not None and old["status"] in ("queued", "failed"):
+                idx["items"].remove(old)  # replaced by this run (same repo, maybe another commit)
+            pool = [e["full_name"].lower() for e in candidates.ranked(POOL_LIMIT)]
+            rank = pool.index(entry["full_name"].lower()) + 1 if entry["full_name"].lower() in pool else None
+            it = store.new_item(entry, rank, manual=True)
+            idx["items"].append(it)
+        else:  # 'generating' here is stale: the caller holds the lock
+            it.update(status="queued", manual=True, started_at=None, progress=None)
+        if entry.get("focus"):
+            it["focus"] = list(entry["focus"])
+    return did
+
+
 def run_item(did: str, echo: Callable[[str], None] | None = None,
              cancel: generate.Cancel | None = None) -> generate.Result:
     """Generate one item now. The caller holds store.generation_lock. Does nothing (a `skipped` Result)
@@ -164,6 +204,7 @@ def run_item(did: str, echo: Callable[[str], None] | None = None,
             _current.pop(did, None)
     if res.ok and res.doc:
         store.save_dossier(res.doc)
+        queue_brief(did, "the dossier is ready")
     with store.edit() as idx:
         store.clear_stop(idx, did)
         it = store.find(idx, did)
@@ -228,6 +269,10 @@ def set_paused(paused: bool, reason: str | None = None, stop: bool = False) -> d
             idx["resumed_at"] = store.now_iso()
     if paused and stop:
         cancel_running(STOPPED_BY_PAUSE)  # this process: now rather than at the next poll
+        try:
+            stopping += _brief().request_stop(STOPPED_BY_PAUSE)  # briefs, in any process
+        except Exception:
+            traceback.print_exc()
     if not paused:
         _kick()
     return {**status(), "stopping": stopping}
@@ -289,6 +334,7 @@ def status() -> dict:
     busy = cur is not None or store.generation_busy()
     if busy and cur is None:
         cur = next((it["id"] for it in idx["items"] if it["status"] == "generating"), None)
+    # a brief holds the same lock: busy stays true, and brief.current() names it (the keys here are fixed)
     return {"running": WORKER.alive or busy, "current": cur, "busy": busy, "paused": bool(idx.get("paused")),
             "paused_reason": idx.get("paused_reason"),
             "backoff_until": WORKER.backoff_until_iso()}
@@ -327,10 +373,25 @@ class Worker:
         moved = store.requeue_stale()
         if moved:
             self.log(f"requeued {', '.join(moved)}")
+        self.queue_briefs()
         clean_stale_clones()
         self._stop.clear()
         self._thread = threading.Thread(target=self.loop, name="dossier-worker", daemon=True)
         self._thread.start()
+
+    def queue_briefs(self) -> list[str]:
+        """Briefs left generating by a dead process go back to the queue; ready dossiers with no brief or a
+        stale one get one queued (spec 7.1)."""
+        try:
+            b = _brief()
+            moved = b.requeue_stale()
+            added = b.queue_missing()
+        except Exception:
+            self.log("brief queue failed:\n" + traceback.format_exc())
+            return []
+        if moved or added:
+            self.log(f"briefs: requeued {len(moved)}, queued {len(added)}")
+        return added
 
     def stop(self) -> None:
         self._stop.set()
@@ -372,6 +433,8 @@ class Worker:
             set_paused(True, f"{FAIL_STREAK} generations failed in a row")
             self.log(f"paused after {FAIL_STREAK} failures in a row")
             return False
+        if self.brief_step():
+            return True
         nxt = next_queued(idx)
         if nxt is None:
             return False
@@ -394,6 +457,30 @@ class Worker:
         return True
 
 
+    def brief_step(self) -> bool:
+        """Run one queued brief (the caller checked pause and backoff). True when it ran one."""
+        try:
+            b = _brief()
+            did = b.next_queued()
+        except Exception:
+            self.log("brief queue failed:\n" + traceback.format_exc())
+            return False
+        if did is None:
+            return False
+        with store.generation_lock(wait_s=1.0) as got:
+            if not got:
+                return False
+            if store.load().get("paused") or b.next_queued() != did:
+                return True
+            self.log(f"writing the brief for {did}")
+            res = b.generate(did, locked=True, echo=self.echo if self.echo else None)
+            self.log(f"{did} brief: " + ("ready" if res["ok"] else res["error"] or "failed")
+                     + f" ({res['elapsed_s']}s, ${res['cost_usd']:.2f})")
+            if res["retryable"]:
+                self._backoff_until = time.time() + BACKOFF_S
+        return True
+
+
 WORKER = Worker()
 
 
@@ -409,6 +496,10 @@ def shutdown(timeout: float = 20.0) -> None:
     for its clone and session cleanup. For the web server's lifespan shutdown."""
     WORKER.stop()
     cancel_running(SHUTDOWN_REASON)
+    try:
+        _brief().cancel_running(SHUTDOWN_REASON)
+    except Exception:
+        pass
     t = WORKER._thread
     if t is not None and t.is_alive() and t is not threading.current_thread():
         t.join(timeout)

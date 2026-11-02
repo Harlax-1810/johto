@@ -5,8 +5,11 @@ browser current over SSE (johto.web.events). Writes come from the builders' modu
 api_actions (claim, decisions, Studio save / AutoQC / submit / unclaim, collect, discard, undo, jobs),
 api_lane (the lane, its terminals) and api_pack (review packs), plus api_dossier. In demo mode those
 writes answer with a "Not connected yet" toast, as they always have, so the demo can't touch real tasks.
+api_task (the task workspace: state card, grading table, kit, draft check, the overview) is mounted the same
+way and first, so its GET /api/tasks/{short}/check wins over api_actions' older lint route of that path.
 
-Lifespan: start the actions jobs runner, the lane monitor, the lane watcher (skipped with JOHTO_NO_WATCH),
+Lifespan: start the actions jobs runner, the lane monitor, the lane watcher and the turn watcher (skipped with
+JOHTO_NO_WATCH; the turn watcher also in fake mode),
 the dossier worker (skipped with JOHTO_NO_WORKER) and the SSE engine with its file watcher.
 """
 from __future__ import annotations
@@ -39,7 +42,10 @@ TOKEN = secrets.token_urlsafe(24)
 STARTED = data.now_iso()
 PORT = config.PORT
 _demo = demo.build()
-EXTENSIONS = ("api_actions", "api_lane")   # builder modules mounted behind the demo guard
+EXTENSIONS = ("api_task", "api_actions", "api_lane",   # builder modules mounted behind the demo guard, in this order
+              "api_brief", "api_discover", "api_workbench", "api_now",   # the redesign's modules (spec.md 7)
+              "api_understand",   # the task understanding behind the Prompt step
+              "api_feedback")     # the sent-back checklist
 PRESENCE: dict = {}
 NONCES: dict[str, tuple[str, str, float]] = {}
 
@@ -223,9 +229,9 @@ def _demo_state(req) -> dict:
             it["label"] = f"{len(leads['leads'])} leads fit · {slots['open']:,} open"
     return {
         "server": _server(req),
-        "settings": {"auto_prepare": True, "studio_filling": "automatic", "daily_cap_usd": 10},
+        "settings": {"auto_prepare": True, "studio_filling": "automatic"},
         "lane": lane, "queue": q, "running": running, "tasks": summaries, "jobs": [],
-        "spend": {"today_usd": 1.54, "cap_usd": 10, "reserve_usd": 2, "paused_until": None},
+        "spend": {"today_usd": 1.54, "paused_until": None},
         "studio": {"state": "ok", "pending": 0, "last_ok_at": data.now_iso()},
         "slots": {"open": slots["open"], "synced_at": slots["synced_at"]},
     }
@@ -246,11 +252,10 @@ def _real_state(req) -> dict:
     jobs = snap["jobs"] + [j for j in _lane_jobs() if j.get("id") not in {x.get("id") for x in snap["jobs"]}]
     return {
         "server": _server(req),
-        "settings": {**st, "auto_prepare": st.get("auto_prepare_lane", True), "daily_cap_usd": st.get("daily_ai_cap_usd", 10)},
+        "settings": {**st, "auto_prepare": st.get("auto_prepare_lane", True)},
         "lane": snap["lane"], "queue": snap["queue"], "running": snap["running"], "tasks": snap["summaries"],
         "jobs": jobs,
-        "spend": {"today_usd": _spend_today(), "cap_usd": st.get("daily_ai_cap_usd", 10), "reserve_usd": st.get("ai_reserve_usd", 2),
-                  "paused_until": None},
+        "spend": {"today_usd": _spend_today(), "paused_until": None},
         "studio": data.studio_state(),
         "slots": {"open": slots["open"], "synced_at": slots["synced_at"]},
     }
@@ -651,6 +656,14 @@ async def api_unlock(req):
     return JSONResponse({"section": t["sections"]["opening_prompt"]})
 
 
+def _details_are_for_a_run(meta: dict) -> bool:
+    """True once a validation run exists or a calibration run is the chosen one: then the details describe that run
+    and Done needs them filled. Before it, Done on the details only starts the validation run."""
+    sub_run = meta.get("submission_run") or ""
+    return sub_run.startswith("calib-") or any(
+        Path(r.get("dir") or "").name.startswith("validate-") for r in meta.get("runs") or [])
+
+
 def _done(short: str, surface: str, confirm, kind: str | None = None) -> tuple[int, dict]:
     """Done on a writing surface (contract 5.2). Local only: it records that a step is finished and, for the
     prompt and the details, queues the next run for the lane ("ready"). It never touches Studio or text."""
@@ -667,6 +680,8 @@ def _done(short: str, surface: str, confirm, kind: str | None = None) -> tuple[i
     else:
         return 400, {"error": {"code": "invalid", "message": "surface must be prompt, details or rate.", "details": {}}}
     missing = [k for k in keys if not (sections.get(k) or {}).get("text", "").strip()]
+    if surface == "details" and not _details_are_for_a_run(workspace.load(d)):
+        missing = []   # Austin's order: only the prompt before the validation run; Done here starts that run
     if surface == "rate":
         r = t["ratings"]
         missing = [k for k in ("one_shot", "task_success", "steering") if not r.get(k)] + missing
@@ -699,8 +714,9 @@ def _done(short: str, surface: str, confirm, kind: str | None = None) -> tuple[i
             m["skipped_calibration"], m["skipped_calibration_at"] = True, now
         elif surface == "details":
             m["details_ready"] = {"at": now, "sha": {k: data.workspace_rev(v) for k, v in texts.items()}}
-            sub_run = m.get("submission_run") or ""
-            if not sub_run.startswith("calib-"):
+            # Details written before any validation run queue the first one. Once a validation run exists (or a
+            # calibration run is chosen), Done only records the details; the ratings come next, not another run.
+            if not _details_are_for_a_run(m):
                 m["ready"] = {"kind": "validate", "at": now}
         else:
             m["rated"] = {"at": now, "rev": t["ratings"].get("rev")}
@@ -804,6 +820,34 @@ async def api_presence(req):
 
 
 @guarded
+async def api_slot_research(req):
+    """Research one repo for a slot group now: {"group": "Action|Domain|Codebase type"} (johto.slot_research)."""
+    body = await req.json() if await req.body() else {}
+    group = str(body.get("group") or "")
+    if group.count("|") != 2:
+        return JSONResponse({"error": "group must be Action|Domain|Codebase type"}, status_code=400)
+    if mode(req) == "demo":
+        return JSONResponse({"error": "not in the demo"}, status_code=409)
+    from .. import slot_research
+    run = await asyncio.to_thread(slot_research.start, group, False)
+    events.poke("job")
+    return JSONResponse(run, status_code=409 if run.get("error") and run.get("state") != "nothing" else 200)
+
+
+@guarded
+async def api_slot_research_mode(req):
+    """Auto or manual research for slot groups with no great option: {"mode": "auto"|"manual"}."""
+    body = await req.json() if await req.body() else {}
+    from .. import slot_research
+    try:
+        m = await asyncio.to_thread(slot_research.set_mode, str(body.get("mode") or ""))
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    events.poke("job")
+    return JSONResponse({"mode": m})
+
+
+@guarded
 async def api_not_wired(req):
     return _not_wired(req)
 
@@ -886,7 +930,8 @@ def create_app() -> Starlette:
     ext_http, ext_ws = _ext_routes()
     routes = [
         Route("/", index), Route("/pick", index), Route("/scout", index), Route("/finished", index),
-        Route("/task/{short}", index), Route("/repos", index), Route("/repos/{id}", index),
+        Route("/task/{short}", index), Route("/task/{short}/understand", index),
+        Route("/repos", index), Route("/repos/{id}", index),
         Route("/api/state", api_state), Route("/api/events", api_events),
         Route("/api/tasks", api_tasks),
         Route("/api/tasks/{short}", api_task),
@@ -901,6 +946,8 @@ def create_app() -> Starlette:
         Route("/api/code/{target}/tree", api_code_tree),
         Route("/api/watch", api_watch),
         Route("/api/presence", api_presence, methods=["POST"]),
+        Route("/api/slots/research", api_slot_research, methods=["POST"]),
+        Route("/api/slots/research-mode", api_slot_research_mode, methods=["POST"]),
         *[Route(r.path, guarded(r.endpoint), methods=list(r.methods - {"HEAD"})) for r in api_dossier.routes],
         *[Route(r.path, guarded(r.endpoint), methods=list(r.methods - {"HEAD"})) for r in api_pack.routes],
         *ext_http,
@@ -920,6 +967,11 @@ def create_app() -> Starlette:
     @asynccontextmanager
     async def lifespan(app):
         started = []
+        try:
+            from .. import slot_research
+            slot_research.requeue_dead()  # a slot research run this server was doing has stopped
+        except Exception as e:  # noqa: BLE001
+            print(f"johto web: slot research cleanup failed: {e}", flush=True)
         # Events from the builder modules reach the browser through the SSE hub.
         for name in EXTENSIONS:
             m = _ext(name)
@@ -949,6 +1001,13 @@ def create_app() -> Starlette:
                 print(f"dossier worker did not start: {e}", flush=True)
         if not config.NO_WATCH:
             lane_watch.start()
+        if not (config.NO_WATCH or config.FAKE):
+            # The turn watcher sends each finished turn's review to GPT Pro (Austin, 2026-11-01: always).
+            try:
+                from .. import turnwatch
+                turnwatch.start()
+            except Exception as e:  # noqa: BLE001  (the UI must come up even if it can't)
+                print(f"turn watcher did not start: {e}", flush=True)
         events.start(watch=True)
         try:
             yield
@@ -956,6 +1015,11 @@ def create_app() -> Starlette:
             events.stop()
             if not config.NO_WATCH:
                 lane_watch.stop()
+                try:
+                    from .. import turnwatch
+                    turnwatch.stop()
+                except Exception:  # noqa: BLE001
+                    pass
             for m in reversed(started):
                 fn = _hook(m, "stop", "shutdown")
                 if fn:

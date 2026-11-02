@@ -80,8 +80,8 @@ def section(key: str, text: str, slot: dict, *, locked: str | None = None, rev: 
             del heading
     pairs = None
     if key == "decision_points":
-        pairs = {"better": len(re.findall(r"\b(better|stronger|strong)\b", text, re.I)),
-                 "worse": len(re.findall(r"\b(worse|weaker|weak)\b", text, re.I))}
+        # lint's words (better/strong/good..., worse/weak/bad...): a structure hint, never a verdict
+        pairs = {"better": len(lint.BETTER.findall(text)), "worse": len(lint.WORSE.findall(text))}
     style = None
     if key == "opening_prompt":
         label, rules = STYLE_RULES.get(slot.get("prompt_style"), ("", ""))
@@ -90,10 +90,56 @@ def section(key: str, text: str, slot: dict, *, locked: str | None = None, rev: 
         "key": key, "heading": SECTION_KEYS[key], "text": text, "rev": rev,
         "words": lint.words(text), "sentences": lint.sentences(text) if text.strip() else 0,
         "pairs": pairs,
-        "lint": [{"level": lvl, "field": fld, "message": msg} for lvl, fld, msg in flags],
+        "lint": [{"level": lvl, "field": fld, "message": plain_lint(msg)} for lvl, fld, msg in flags],
         "overlap": [], "style": style,
         "locked": {"reason": locked} if locked else None,
     }
+
+
+# The editors show lint in plain sentences (the CLI keeps lint.py's short forms). First match wins; a message with
+# no rule here shows as lint.py wrote it.
+_LINT_WORDS = [
+    (r"starts with a greeting", lambda m: "It starts with a greeting."),
+    (r"'please'/'could you' framing: (.+)", lambda m: f"Polite framing: {m[1]}."),
+    (r"role-play opener", lambda m: "It opens with a role, like \"You are a ...\"."),
+    (r"form label: (.+)", lambda m: f"A form label: {m[1]}."),
+    (r"step-by-step procedure", lambda m: "It lists numbered steps."),
+    (r"grading/rubric language: (.+)", lambda m: f"Grading words: {m[1]}."),
+    (r"(\d+) words; casual prose is about 20-60", lambda m: f"{m[1]} words. Casual prompts run about 20 to 60."),
+    (r"has a list; casual prose has no lists", lambda m: "It has a list. Casual prompts are plain prose."),
+    (r"markdown bold/links/headings", lambda m: "Bold, links or headings make it read like a template."),
+    (r"(\d+) requirement words", lambda m: f"{m[1]} requirement words, like must or should. Casual prompts keep one at most."),
+    (r"(\d+) words; explicit spec is about 450-1,200", lambda m: f"{m[1]} words. Specs run about 450 to 1,200."),
+    (r"all lowercase; explicit spec", lambda m: "All lowercase. Specs need clean writing."),
+    (r"no numbered requirements", lambda m: "No numbered requirements."),
+    (r"no clear 'done when'", lambda m: "It doesn't say when the work is done."),
+    (r"no pasted error/log/stack trace", lambda m: "No pasted error or log."),
+    (r"(\d+) words outside the artifact", lambda m: f"{m[1]} words around the pasted error. Keep that to one short line."),
+    (r"criteria words outside the artifact", lambda m: "Criteria words around the pasted error. Error reports have none."),
+    (r"(\d+) sentences; aim for 1-3", lambda m: f"{m[1]} sentences. Aim for 1 to 3, more only for context."),
+    (r"very short; say what a proper solution", lambda m: "Very short. Mercor asks what a proper solution must do and what doesn't count."),
+    (r"no must-nots", lambda m: "The goal names no shortcut that doesn't count, like loosening the tests."),
+    (r"found (\d+) better and (\d+) worse markers", lambda m: "Few better or worse words. Mercor asks for 2 to 3 points, "
+                                                           "each a better and a worse choice."),
+    (r"more than 3 points", lambda m: "More than 3 points. Mercor asks for 2 to 3."),
+    (r"under 15 words \(Studio minimum\)", lambda m: "Under 15 words, Studio's minimum."),
+    (r"(\d+) sentences; aim for 3-5", lambda m: f"{m[1]} sentences. Aim for 3 to 5."),
+    (r"generic phrase (.+?); name the mechanism", lambda m: f"A generic phrase, {m[1]}. Mercor asks for the mechanism by name."),
+    (r"say where it struggled", lambda m: "Short. Mercor asks where Claude struggled, what went wrong and how much you steered."),
+    (r"Operate tasks should describe", lambda m: "Operate tasks describe how to reach the starting state."),
+    (r"repeats private goal/decision-point wording: (.+)", lambda m: f"It repeats wording from your goal or decision points: {m[1]}."),
+    (r"words that read as AI-written: (.+)", lambda m: f"Words that read as AI-written: {m[1]}."),
+    (r"em dashes read as AI-written", lambda m: "Em dashes read as AI-written."),
+]
+
+
+def plain_lint(msg: str) -> str:
+    """lint.py's message for one flag, as the editors say it."""
+    for rx, words in _LINT_WORDS:
+        m = re.search(rx, msg or "")
+        if m:
+            return words(m)
+    return msg
 
 
 def ratings(r: dict, slot: dict) -> dict:
@@ -242,12 +288,53 @@ def _lead_by_id(lead_id: str | None) -> dict | None:
     return next((x for x in json.loads(p.read_text()) if x.get("id") == lead_id), None)
 
 
-def _label(meta: dict, lead: dict | None) -> str:
+def _label(meta: dict, lead: dict | None, d: Path | None = None) -> str:
     repo = short_repo(meta["repo"].get("full_name", ""))
     if meta.get("label"):
         return meta["label"]
-    title = (lead or {}).get("title") or meta["task_name"]
+    title = (lead or {}).get("title") or (_seed_title(d, meta) if d is not None else None) or meta["task_name"]
     return f"{repo} · {title}"
+
+
+_SEED_TITLES: dict = {}   # short -> (at, title)
+
+
+def seed_match(d: Path, meta: dict) -> dict | None:
+    """For a task claimed outside the brief (no origin or dossier recorded): the brief seed it matches
+    (api_discover.match_seed: same action, shared words with his prompt and goal) as {dossier_id, opportunity_id,
+    title}, so the rail, the page title and "Where this task came from" name the problem instead of "Task
+    t4sk0002". Cached for a minute."""
+    if (meta.get("origin") or {}).get("kind") or (meta.get("dossier") or {}).get("id"):
+        return None
+    hit = _SEED_TITLES.get(d.name)
+    if hit and time.time() - hit[0] < 60:
+        return hit[1]
+    found = None
+    try:
+        from . import api_discover as disc
+        repo = (meta.get("repo") or {}).get("full_name", "").lower()
+        for bp in sorted((config.DATA / "dossiers").glob("*.brief.json")):
+            b = _json(bp) or {}
+            if str(b.get("repo") or "").lower() != repo:
+                continue
+            did = b.get("dossier_id") or bp.name[:-len(".brief.json")]
+            doc = _json(config.DATA / "dossiers" / f"{did}.json") or {}
+            opps = {o.get("id"): o for o in disc._opps(doc)}
+            seeds = [{**x, "fits": [{"action": f.get("action")} for f in (opps.get(x.get("opportunity_id")) or {})
+                                    .get("slot_fit") or []]} for x in b.get("seeds") or []]
+            m = disc.match_seed((meta.get("slot") or {}).get("action"), disc._task_text(d.name), seeds)
+            if m and m.get("title"):
+                found = {"dossier_id": did, "opportunity_id": m.get("opportunity_id"), "title": m["title"]}
+                break
+    except Exception as e:  # noqa: BLE001  (a label is never worth a broken page)
+        print(f"johto web: seed match for {d.name} failed: {e}", flush=True)
+    _SEED_TITLES[d.name] = (time.time(), found)
+    return found
+
+
+def _seed_title(d: Path, meta: dict) -> str | None:
+    m = seed_match(d, meta)
+    return m["title"] if m else None
 
 
 # --- Providers: other builders' modules, used when they are present ---------------------------------------
@@ -667,6 +754,27 @@ def _updated_at(d: Path) -> str | None:
     return _iso(max(ts)) if ts else None
 
 
+def _runmon():
+    from .lane import runmon
+    return runmon
+
+
+def submission_run(meta: dict, d: Path) -> str | None:
+    """The run the submission uses: actions.submission_run (the one rule), else the same rule here: the run Austin
+    chose (task.json submission_run), else the latest collected validation run."""
+    return _runmon().submission_run(meta, d)
+
+
+def monitor_of(d: Path, meta: dict, local_up: dict | None = None) -> dict | None:
+    """The run monitor for a task's current run (lane/runmon.py). Never waits on the PC: in the web app it is the
+    last measurement; without the monitor thread (tests, the CLI) it measures this Mac's runs inline."""
+    try:
+        return _runmon().for_task(d, meta, local_up=local_up)
+    except Exception as e:
+        print(f"johto web: run monitor failed for {d.name}: {e}", flush=True)
+        return None
+
+
 def task_base(d: Path, running: set[str] | None = None) -> dict:
     """What every view of a task needs: files read, runs with facts. Cheap enough for each queue rebuild."""
     meta = workspace.load(d)
@@ -686,10 +794,18 @@ def task_base(d: Path, running: set[str] | None = None) -> dict:
         if r["kind"] == "calib":
             r["recommend"] = dom.facts.recommend(r["facts"], slot)
     base = {"short": d.name, "dir": d, "meta": meta, "sub": sub, "lead": lead, "slot": slot, "texts": texts,
-            "runs": runs, "label": _label(meta, lead), "claude_min": total}
+            "runs": runs, "label": _label(meta, lead, d), "claude_min": total}
+    mon = monitor_of(d, meta, {r["name"]: r["container_up"] for r in runs})
+    base["monitor"] = mon
+    if mon and mon.get("host_name") and mon.get("up") and not mon.get("collected") \
+            and mon.get("state") in ("working", "waiting", "background", "ready"):
+        for r in runs:
+            if r["name"] == mon.get("run") and not r["live"]:
+                r["remote_live"] = True     # a lane on the PC (or one the Mac's Docker check missed)
+    base["submission_run"] = submission_run(meta, d)   # actions.submission_run: the one rule
     sr = dom.derive.submission_run(base)
     rec = next((x for x in meta.get("runs", []) if Path(x["dir"]).name == (sr or {}).get("name")), {})
-    minutes = rec.get("active_minutes") or ((sr or {}).get("facts") or {}).get("active_min")
+    minutes = (workspace.run_minutes(rec, d) if rec else None) or ((sr or {}).get("facts") or {}).get("active_min")
     base["ratings"] = _ratings_of(sub, slot, minutes)
     base["changed_since_push"] = changed_since_push(meta, sub, minutes)
     base["sub_run"] = sr
@@ -712,8 +828,9 @@ def summary_of(ts: dict) -> dict:
         "studio": {"status": studio.get("status") or "Writing",
                    "url": f"{config.STUDIO}/annotator/tasks/{meta['task_id']}/?campaignId={config.CAMPAIGN_ID}"},
         "lead_id": meta.get("lead_id"), "claude_min": ts["claude_min"], "my_min": _my_min(ts["dir"]),
-        "updated_at": _updated_at(ts["dir"]), "submission_run": meta.get("submission_run"),
-        "dossier": _dossier_ref(meta),
+        "updated_at": _updated_at(ts["dir"]), "submission_run": submission_run(meta, ts["dir"]),
+        "submission_run_chosen": meta.get("submission_run"),
+        "dossier": _dossier_ref(meta), "monitor": _runmon().public(ts.get("monitor")),
     }
 
 
@@ -855,7 +972,8 @@ def task_detail(ts: dict) -> dict:
         "checklist": _checklist(ts, sections, qc),
         "upstream_mentions": _upstream(ts), "discard": _discard_view(ts),
         "fingerprints": {"algo": "fnv1a32-6gram-v1", "hashes": []},
-        "submission_run": meta.get("submission_run"),
+        "submission_run": summary["submission_run"], "submission_run_chosen": meta.get("submission_run"),
+        "monitor": ts.get("monitor"),
         "stage_info": {k: v for k, v in ts["stage"].items() if k in ("run", "since", "chosen", "skipped", "rework")},
         "brief_md": (ts["dir"] / "brief.md").read_text() if (ts["dir"] / "brief.md").exists() else "",
     }
@@ -942,11 +1060,18 @@ def real_snapshot() -> dict:
     svc = service_lane() is not None
     snap = {"tasks": states, "lane": lane, "blockers": blockers(bases, lane),
             "leads": {"usable": usable, "open": slots_open}, "prefs": item_prefs(), "settings": settings(),
-            "lane_service": svc, "now": time.time()}
+            "lane_service": svc, "studio": studio_state(), "now": time.time()}
     q, running = _domain().queue.build_queue(snap)
     _LAST.update(at=time.time(), lane=lane, jobs=jobs)
     return {"states": states, "summaries": summaries, "lane": lane, "jobs": jobs, "queue": q, "running": running,
             "lane_service": svc}
+
+
+def overview() -> list[dict]:
+    """Home's task list as one plain row per task, in Home's order ({short, title, needs_you, machine, action,
+    command, priority}): the shared helper STATE's where.overview() uses, so `johto where` ranks like Home."""
+    snap = real_snapshot()
+    return _domain().queue.overview_rows(snap["queue"], snap["running"])
 
 
 def real_task(d: Path) -> dict:
@@ -958,7 +1083,25 @@ def real_task(d: Path) -> dict:
         bases = _bases()
         lane, jobs = lane_state(bases), jobs_snapshot()
         base = next((b for b in bases if b["short"] == d.name), None) or task_base(d)
-    return task_detail(task_state(base, lane, jobs))
+    st = task_state(base, lane, jobs)
+    out = task_detail(st)
+    out["lane_need"] = lane_need_of(st, lane)
+    return out
+
+
+def lane_need_of(st: dict, lane: dict | None) -> dict | None:
+    """What this task's live run asks of Austin, from the same rule Now's queue uses (queue._lane_need), so the
+    task page and Now agree on whether Claude waits on him: {kind, question, run} or None."""
+    try:
+        need = _domain().queue._lane_need(st, lane or {}, time.time())
+    except Exception as e:  # noqa: BLE001
+        print(f"johto web: lane need failed for {st.get('short')}: {e}", flush=True)
+        return None
+    if not need:
+        return None
+    mon = st.get("monitor") or {}
+    q = need.get("question") or mon.get("question") or ((lane or {}).get("question") if need.get("local") else None)
+    return {"kind": need["kind"], "question": q, "run": need.get("run")}
 
 
 def real_tasks() -> list[dict]:

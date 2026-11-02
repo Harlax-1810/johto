@@ -265,6 +265,16 @@ class Resume(unittest.TestCase):
     def test_own_lane_already_up_stops_nothing(self):
         self.assertEqual(self.resume(["me", "old"], {"old": 1}), [])
 
+    def test_a_pc_run_goes_over_ssh_and_stops_nothing_here(self):
+        workspace.save(self.d, {"task_name": "Task abc", "runs": [
+            {"dir": "runs/validate-1", "port_slot": 0, "host": "build-box", "remote_dir": "/home/a/l/abc/v1"}]})
+        execs = []
+        with mock.patch("os.execvp", lambda f, args: execs.append(args)):
+            stopped = self.resume(["busy-mac-lane"], {"busy-mac-lane": 0})
+        self.assertEqual(stopped, [])
+        self.assertEqual(execs[0][:3], ["ssh", "-t", "build-box"])
+        self.assertTrue(execs[0][3].startswith("cd /home/a/l/abc/v1/model_a && ./claude-dev"))
+
 
 if __name__ == "__main__":
     unittest.main()

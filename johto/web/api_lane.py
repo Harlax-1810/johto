@@ -1,9 +1,10 @@
 """Lane routes (build-plan 5.2 "Lane" and 5.4): GET /api/lane, start, type, end, collect, unlock, Ghostty,
-auto-prepare, and the WebSockets /ws/lane (the shared Claude terminal) and /ws/shell (a bash per socket).
+auto-prepare, GET /api/lane/monitor (the run monitor: clocks, the last turn, the review), and the WebSockets /ws/lane (the shared Claude terminal) and /ws/shell (a bash per socket).
 
 Wiring for app.py:
     routes            put them before the /api/{rest:path} catch-all, and drop app.ws_lane's route
-    start() / stop()  call from the lifespan (start needs the running loop)
+    start() / stop()  call from the lifespan (start needs the running loop); they also run the run monitor's
+                      thread (lane/runmon.py), so no request waits on ssh to the PC
     lane_state()      LaneState for /api/state and the events engine (data._lane_provider finds it)
 
 Every request needs the session cookie; mutating requests and both sockets also need Origin and Host to be
@@ -22,6 +23,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from .lane import runmon
 from .lane.service import LaneError, svc
 
 
@@ -121,6 +123,25 @@ async def get_lane(req: Request):
     if not svc.running:
         await svc.refresh()
     return JSONResponse(svc.state())
+
+
+async def get_monitor(req: Request):
+    """GET /api/lane/monitor?short=&run= : the run monitor for one run (default: the task's current run).
+    Waits up to 3 s for a first measurement; null while the PC hasn't answered yet."""
+    from .. import config, workspace
+    short = (req.query_params.get("short") or "").strip()
+    if not short or "/" in short or short.startswith("."):
+        return err(400, "invalid", "Which task? Pass ?short=.")
+    d = config.TASKS / short
+    try:
+        meta = await asyncio.to_thread(workspace.load, d)
+    except (OSError, ValueError):
+        return err(404, "not_found", f"No task {short}.")
+    run = (req.query_params.get("run") or "").strip() or runmon.current_run(meta, d)
+    if run and not (d / "runs" / run).is_dir():
+        return err(404, "not_found", f"No run {run} in task {short}.")
+    mon = await asyncio.to_thread(runmon.get, d, run, wait=3.0) if run else None
+    return JSONResponse({"short": short, "run": run, "monitor": mon})
 
 
 async def post_start(req: Request):
@@ -259,6 +280,7 @@ async def ws_shell(ws: WebSocket):
 
 routes = [
     Route("/api/lane", guarded(get_lane, mutating=False)),
+    Route("/api/lane/monitor", guarded(get_monitor, mutating=False)),
     Route("/api/lane/start", guarded(post_start), methods=["POST"]),
     Route("/api/lane/type", guarded(post_type), methods=["POST"]),
     Route("/api/lane/end", guarded(post_end), methods=["POST"]),
@@ -273,12 +295,24 @@ routes = [
 
 
 def start() -> None:
-    """Lifespan hook: start the lane monitor on the running loop."""
+    """Lifespan hook: start the lane monitor on the running loop, and the run monitor's thread (a change it
+    measures pokes the events engine and the lane service, so Home and the drawer update)."""
     svc.start()
+    runmon.start()
+
+    def changed() -> None:
+        try:
+            from . import events
+            events.poke("monitor")
+        except Exception:
+            pass
+        svc.poke()
+    runmon.listen(changed)
 
 
 def stop() -> None:
     """Lifespan hook: stop the monitor and detach the server's terminal (Claude keeps running)."""
+    runmon.stop()
     svc.stop()
 
 

@@ -11,7 +11,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from .. import config, pack
+from .. import config, pack, settings
 
 JOBS: dict[str, dict] = {}
 _LOCK = threading.Lock()
@@ -56,7 +56,9 @@ def _start(short: str, run: str, ai: bool) -> dict:
 
 def _packs(short: str) -> list[dict]:
     out = []
-    for p in sorted((config.TASKS / short / "runs").glob("*/review-pack-*.xml"), key=lambda p: -p.stat().st_mtime):
+    runs = config.TASKS / short / "runs"
+    found = [*runs.glob("*/review-pack-*.xml"), *runs.glob("*/review-followup-*.xml")]   # full packs and follow-ups
+    for p in sorted(found, key=lambda p: -p.stat().st_mtime):
         out.append({"run": p.parent.name, "path": str(p), "name": p.name, "bytes": p.stat().st_size,
                     "made_at": time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(p.stat().st_mtime))})
     return out
@@ -69,7 +71,9 @@ async def start(req: Request):
     if not (config.TASKS / short / "runs" / run).is_dir():
         return JSONResponse({"error": {"code": "not_found", "message": f"No run {run} for {short}.", "details": {}}}, status_code=404)
     body = await req.json() if (await req.body()) else {}
-    return JSONResponse({"job": _job_view(_start(short, run, bool(body.get("ai", True))))}, status_code=202)
+    # The outside Claude review is added only when asked, else by settings pack_outside_review (off by default).
+    ai = body["ai"] if isinstance(body.get("ai"), bool) else bool(settings.get("pack_outside_review"))
+    return JSONResponse({"job": _job_view(_start(short, run, ai))}, status_code=202)
 
 
 async def job(req: Request):
@@ -88,7 +92,7 @@ async def listing(req: Request):
 def _resolve(req: Request) -> Path | None:
     short, name = req.path_params["short"], req.path_params["name"]
     for p in (config.TASKS / short / "runs").glob(f"*/{name}"):
-        if p.name.startswith("review-pack-") and p.suffix == ".xml":
+        if p.name.startswith(("review-pack-", "review-followup-")) and p.suffix == ".xml":
             return p
     return None
 
