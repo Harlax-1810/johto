@@ -528,6 +528,24 @@ def _rel(path: str, clone: Path) -> str | None:
     return None
 
 
+def _mentioned(condensed: str, clone: Path, limit: int = 40) -> list[str]:
+    """Repo files the transcript names: application code first, then tests, docs and config, most named first
+    within each. Claude often reads code through Bash (sed, grep), which condense's read count can't see, so a
+    run with no diff would otherwise reach the reviewer with no code."""
+    names = collections.Counter(re.findall(r"(?:[\w.-]+/)+[\w.-]+\.\w+", condensed))
+    found = collections.Counter()
+    for name, n in names.items():
+        rel = _rel(name, clone)
+        if rel:
+            found[rel] += n
+    def minor(rel: str) -> bool:
+        path = Path(rel)
+        return (path.suffix.lower() in (".md", ".txt", ".conf", ".json", ".yml", ".yaml", ".toml", ".lock")
+                or any(part in ("tests", "test", "site", "docs") for part in path.parts)
+                or path.name.startswith("test_"))
+    return sorted(found, key=lambda rel: (minor(rel), -found[rel]))[:limit]
+
+
 def _covered(tpath: Path, diff: str) -> dict | None:
     """How far into the run a pack reaches (delta.state), so the next follow-up starts where this one stopped."""
     try:
@@ -602,6 +620,9 @@ def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log,
     brief = (task_dir / "brief.md")
     notes = ("\n## Research notes behind this task (AI research, for context)\n\n" + brief.read_text()
              if brief.exists() else "")
+    context = task_dir / "review-context.md"   # optional: this task's history, written for the reviewer
+    if context.exists():
+        notes += "\n" + context.read_text()
 
     condensed, stats = condense(g["transcript_path"])
     log(f"Transcript: {stats['turns']} human turn{'' if stats['turns'] == 1 else 's'}, {len(condensed):,} characters condensed")
@@ -632,7 +653,7 @@ def _build(task_dir: Path, run_name: str | None, max_tokens: int, ai: bool, log,
     changed = _changed_files(g["diff"])
     picks = (review or {}).get("extra_files", []) if review and not review.get("error") else []
     read_rel = [r for r in (_rel(p, clone) for p, _ in stats["reads"].most_common(40)) if r]
-    ordered = list(dict.fromkeys(changed + picks + read_rel))
+    ordered = list(dict.fromkeys(changed + picks + read_rel + _mentioned(condensed, clone)))
     fixed = sum(_tokens(f.read_text()) for f in (*rv.glob("*"), *(pack / "3-outside-review").glob("*.md")))
     budget = max_tokens - fixed - _tokens(task_md) - 1_000 - 3_000   # 1,000: the coverage lines added below
     t_budget = int(budget * 0.45)

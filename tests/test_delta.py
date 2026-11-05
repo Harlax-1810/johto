@@ -337,6 +337,40 @@ class PackPieces(Fixture):
         self.assertEqual((note, partial), ("applied", None))
         self.assertIn("retry()", (dest / "worker/run.go").read_text())
 
+    def test_a_task_review_context_goes_into_the_task_file(self):
+        (self.d / "review-context.md").write_text("# History for the reviewer\n")
+        seen = {}
+
+        def fake_run(cmd, cwd=None, timeout=None, input=None):
+            seen["task"] = (Path(cmd[len(pack.REPOMIX)]) / "1-review" / "01-task.md").read_text()
+            Path(cmd[cmd.index("--output") + 1]).write_text("pack")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        slot = dict.fromkeys(("action", "domain", "codebase_type", "prompt_style", "interaction_mode"), "x")
+        g = {"meta": {"task_name": "t", "slot": slot, "repo": {"full_name": FULL, "commit": self.commit,
+                                                               "pinned_url": "u", "language": "Go"}},
+             "run_dir": self.run_dir, "sub": {"sections": {}}, "live": False, "diff": DIFF1,
+             "transcript_path": self.tpath}
+        clone = self.root / "work" / "repo"
+        clone.mkdir(parents=True)
+        with mock.patch.object(pack, "gather", return_value=g), mock.patch.object(pack, "_run", fake_run), \
+                mock.patch.object(pack, "checkout", return_value=(clone, "applied", None)):
+            pack._build(self.d, "validate-1", 200_000, False, lambda *_: None, self.root / "work")
+        self.assertIn("# History for the reviewer", seen["task"])
+
+    def test_files_read_through_bash_count_as_mentioned(self):
+        clone = self.root / "work" / "repo"
+        (clone / "worker").mkdir(parents=True)
+        (clone / "worker/run.go").write_text("x")
+        (clone / "worker/other.go").write_text("x")
+        text = ("sed -n 1,9p worker/other.go\nsed -n 1,9p /exp/t/model_a/worker/run.go\ngrep y worker/run.go:12\n"
+                "cat /tmp/scratchpad/nope.py\n")
+        self.assertEqual(pack._mentioned(text, clone), ["worker/run.go", "worker/other.go"])
+        (clone / "tests").mkdir()
+        (clone / "tests/run_test.go").write_text("x")
+        text = "tests/run_test.go tests/run_test.go tests/run_test.go worker/other.go"
+        self.assertEqual(pack._mentioned(text, clone), ["worker/other.go", "tests/run_test.go"])
+
     def test_rejected_hunks_mark_the_checkout_partial(self):
         bad = DIFF2.replace("-func Run() {}", "-func Run() { gone() }")
         missing = ("diff --git a/nope.go b/nope.go\n--- a/nope.go\n+++ b/nope.go\n@@ -1 +1 @@\n-a\n+b\n")

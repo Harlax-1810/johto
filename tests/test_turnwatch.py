@@ -346,6 +346,19 @@ class NewTurns(Base):
         self.assertEqual(len(self.delta.calls), 1)
         self.assertNotIn("recheck_at", self.state()["runs"]["zz01/validate-1"])
 
+    def test_a_review_hold_keeps_the_review_back_until_the_file_goes(self):
+        self.budget.st[("zz01", "validate-1")] = dict(status([turn(1, wm=12, ago=400)]), background_running=1)
+        hold = self.d / "review-hold"
+        hold.touch()
+        self.tick()     # past the background wait, but held
+        self.assertEqual(self.delta.calls, [])
+        hold.unlink()
+        st = self.state()
+        st["runs"]["zz01/validate-1"]["recheck_at"] = time.time() - 1
+        turnwatch.save_state(st)
+        self.tick()
+        self.assertEqual(len(self.delta.calls), 1)
+
     def test_turn_that_continues_after_a_background_job_is_reviewed_again(self):
         self.budget.st[("zz01", "validate-1")] = status([turn(1, wm=12, ago=900)])
         self.tick()

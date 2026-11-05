@@ -488,6 +488,9 @@ def _turns(t: _Tick, r: dict, ent: dict, st: dict) -> float | None:
         i = tr.get("index")
         if tr.get("ended") != "end_turn" or not isinstance(i, int) or i < ent["last_turn"]:
             continue
+        if tr is last and (Path(r["task_dir"]) / "review-hold").exists():
+            # Austin or a helper is holding this task's review: the turn isn't over in a way that counts yet.
+            return time.time() + BUSY_READ_S
         if tr is last and (tr.get("background_open") or st.get("background_running")):
             # Claude ended its turn with a background job running (tests, a build): give the job a few
             # minutes to finish and wake Claude up. A dev server never finishes, so after that, review anyway.
