@@ -91,7 +91,8 @@ class Base(unittest.TestCase):
             p.start()
         fake.reset()
         fake.QC_DELAY_S = 0.1
-        fake_gh.ACCOUNT = "austeane"
+        fake_gh.ACCOUNT = fake_gh.GH_ACCOUNT
+        fake_gh.CREATED.clear()
         jobs.EVENTS.clear()
         jobs.start()
 
@@ -175,7 +176,7 @@ class FullFlow(Base):
         self.assertEqual(qc["state"], "succeeded", qc)
         self.assertEqual(qc["result"]["counts"]["fail"], 0)
         cf = fake.task(meta["task_id"])["custom_fields"]
-        self.assertTrue(cf["field_conversation_log"].startswith("https://gist.github.com/austeane/"))
+        self.assertTrue(cf["field_conversation_log"].startswith(f"https://gist.github.com/{fake_gh.GH_ACCOUNT}/"))
         self.assertEqual(cf["field_opening_prompt"], fx.PROMPT)
         self.assertEqual(cf["field_claude_minutes"], 40)
         gist_files = [c["name"] for c in fake_gh.CREATED]
@@ -349,7 +350,7 @@ class Gates(Base):
         st, res = call("POST", f"/api/tasks/{short}/studio/save", {})
         j = done(res["job"])
         self.assertEqual(j["error"]["code"], "gh_account")
-        self.assertIn("gh auth switch -u austeane", j["error"]["message"])
+        self.assertIn(f"gh auth switch -u {fake_gh.GH_ACCOUNT}", j["error"]["message"])
 
 
 class ClaimPaths(Base):
@@ -410,6 +411,122 @@ class ClaimPaths(Base):
         self.assertEqual(j["error"]["details"]["step"], "saving_repo")
         j = self.claim(task_id=fx.TASKS[0]["task_id"])
         self.assertEqual(j["state"], "succeeded", j)
+
+
+class DraftFlow(Base):
+    """A task prepared with no slot, then one press claims a slot and fills Studio."""
+
+    def draft(self, **body) -> dict:
+        j = self.claim(draft=True, **body)
+        self.assertEqual(j["state"], "succeeded", j)
+        self.assertTrue(j["result"]["draft"])
+        return j
+
+    def test_draft_then_claim_slot_fills_studio_in_one_press(self):
+        j = self.draft()
+        short = j["result"]["short"]
+        d = self.root / "tasks" / short
+        meta = workspace.load(d)
+        self.assertIsNone(meta["task_id"])
+        self.assertEqual(j["result"]["open"], 3)
+        # Studio is untouched by the draft.
+        self.assertEqual(fake.status_name(fake.task(fx.TASKS[0]["task_id"])), "Ready to Claim")
+        # The task page knows it is a draft, and the queue asks for a slot once the work is written.
+        from johto.web import api_workbench, data
+        t = data.real_task(d)
+        self.assertEqual(t["studio"]["status"], "Draft")
+        self.assertIsNone(t["studio"]["url"])
+        self.assertEqual(t["studio"]["draft"]["open"], 3)
+        # Studio writes are refused until a slot is claimed.
+        st, res = call("POST", f"/api/tasks/{short}/studio/save", {})
+        self.assertEqual(st, 409, res)
+        self.assertEqual(res["error"]["code"], "no_slot")
+        st, res = call("POST", f"/api/tasks/{short}/studio/submit", {})
+        self.assertEqual(st, 409, res)
+        # The whole local path: the run, the fields, the ratings.
+        run = self.lane_and_collect(short, "validate")
+        fx.write_fixture_text(d)
+        st, res = call("POST", f"/api/tasks/{short}/done", {"surface": "rate"}) if False else (200, None)
+        actions.update_meta(d, lambda m: m.update(rated={"at": "2026-10-30T12:00:00Z"}))
+        snap = data.real_snapshot()
+        row = next(i for i in snap["queue"] if i.get("short") == short)
+        self.assertEqual(row["kind"], "claim_slot")
+        wb = api_workbench.build(**api_workbench.real_inputs(d))
+        self.assertEqual(wb["step"], "submit")
+        self.assertEqual(wb["submit"]["draft"]["open"], 3)
+        self.assertFalse(wb["submit"]["can_submit"])
+        self.assertIn("Claim a slot", wb["lede"])
+        self.assertEqual(wb["path"][3]["summary"], "Needs a slot")
+        # One press: claim the slot, upload the gists, save every field, start AutoQC.
+        st, res = call("POST", f"/api/tasks/{short}/claim-slot", {})
+        self.assertEqual(st, 202, res)
+        j = done(res["job"])
+        self.assertEqual(j["state"], "succeeded", j)
+        self.assertEqual(j["result"]["task_id"], fx.TASKS[0]["task_id"])
+        self.assertEqual(j["result"]["run"], run)
+        self.assertTrue(j["result"]["gists"]["conversation_log"])
+        self.assertTrue(j["result"]["audit_id"])
+        meta = workspace.load(d)
+        self.assertEqual(meta["task_id"], fx.TASKS[0]["task_id"])
+        self.assertEqual((d).name, short)   # the folder keeps its name
+        t = fake.task(fx.TASKS[0]["task_id"])
+        self.assertEqual(fake.status_name(t), "Writing")
+        cf = t["custom_fields"]
+        self.assertEqual(cf["field_high_level_goal"], fx.FIXTURE_TEXT["High-Level Task Goal"])
+        self.assertEqual(cf["field_opening_prompt"], fx.PROMPT)
+        self.assertTrue(cf["field_conversation_log"].startswith("https://gist.github.com/"))
+        self.assertEqual(cf["field_repo_name"], "acme/widget")
+        self.assertTrue(meta["pushed"]["at"])
+        self.assertEqual(meta["qc"][-1]["spec"], "AutoQC")
+        wait_for(lambda: (workspace.load(d).get("qc") or [{}])[-1].get("status") == "completed")
+        # From here the task is an ordinary one: its page shows Studio, and a second claim is refused.
+        t2 = data.real_task(d)
+        self.assertEqual(t2["studio"]["status"], "Writing")
+        self.assertIsNone(t2["studio"]["draft"])
+        st, res = call("POST", f"/api/tasks/{short}/claim-slot", {})
+        self.assertEqual(st, 400, res)
+
+    def test_claim_slot_with_nothing_open_and_a_taken_slot(self):
+        short = self.draft()["result"]["short"]
+        for t in fx.TASKS:
+            fake.take(t["task_id"])
+        st, res = call("POST", f"/api/tasks/{short}/claim-slot", {})
+        self.assertEqual(st, 202, res)
+        j = done(res["job"])
+        self.assertEqual(j["state"], "failed")
+        self.assertEqual(j["error"]["code"], "no_open_slot")
+        self.assertIsNone(workspace.load(self.root / "tasks" / short)["task_id"])
+        # A named slot that went to someone else offers the next one.
+        fake.set_status(fx.TASKS[1]["task_id"], "Ready to Claim", owner=None)
+        st, res = call("POST", f"/api/tasks/{short}/claim-slot", {"task_id": fx.TASKS[0]["task_id"]})
+        j = done(res["job"])
+        self.assertEqual(j["error"]["code"], "taken")
+        self.assertEqual(j["error"]["details"]["alternative"]["task_id"], fx.TASKS[1]["task_id"])
+
+    def test_a_slot_opening_is_announced_and_the_draft_can_be_deleted(self):
+        short = self.draft()["result"]["short"]
+        for t in fx.TASKS:
+            fake.take(t["task_id"])
+        st, res = call("POST", "/api/slots/sync", {})
+        done(res["job"])
+        self.assertEqual(actions.draft_open(workspace.load(self.root / "tasks" / short)), 0)
+        toasts = []
+        jobs.EVENTS.clear()
+        fake.set_status(fx.TASKS[2]["task_id"], "Ready to Claim", owner=None)
+        with mock.patch.object(jobs, "publish", side_effect=lambda name, d: toasts.append(d) if name == "toast" else None):
+            st, res = call("POST", "/api/slots/sync", {})
+            j = done(res["job"])
+        self.assertEqual(j["result"]["opened"], [short])
+        self.assertTrue(any("A slot opened" in t["text"] for t in toasts), toasts)
+        # Delete asks twice, then the folder moves to tasks/.drafts.
+        st, res = call("POST", f"/api/tasks/{short}/draft/delete", {})
+        self.assertEqual(st, 409, res)
+        nonce = res["error"]["details"]["nonce"]
+        st, res = call("POST", f"/api/tasks/{short}/draft/delete", {"confirm": nonce})
+        self.assertEqual(st, 202, res)
+        self.assertEqual(done(res["job"])["state"], "succeeded")
+        self.assertFalse((self.root / "tasks" / short).exists())
+        self.assertTrue(list((self.root / "tasks" / ".drafts").iterdir()))
 
 
 class Drops(Base):

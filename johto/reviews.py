@@ -165,10 +165,54 @@ def latest(task_dir: Path, run: str | None = None) -> dict | None:
     return rows[-1] if rows else None
 
 
+def _message_text(item) -> str | None:
+    """The text of one API message object ({"type": "message", "content": [{"type": "output_text", "text"}]},
+    or Chat Completions' {"message": {"content": str}}), else None."""
+    if not isinstance(item, dict):
+        return None
+    content = item.get("content")
+    if isinstance(content, list) and (item.get("type") == "message" or item.get("role") == "assistant"):
+        parts = [c["text"] for c in content if isinstance(c, dict) and isinstance(c.get("text"), str)
+                 and c.get("type") in (None, "output_text", "text")]
+        return "\n\n".join(p for p in parts if p.strip()) or None
+    msg = item.get("message")
+    if isinstance(msg, dict) and isinstance(msg.get("content"), str):
+        return msg["content"]
+    return None
+
+
+def unwrap(text: str) -> str:
+    """The reply's Markdown out of an API JSON wrapper, when the pasted text is one: a Responses API message
+    object, a whole Responses API response ({"output": [...]}, or its "output_text"), a list of message objects,
+    or a Chat Completions response ({"choices": [...]}). Anything else, a bare findings array included, is
+    returned as it came."""
+    s = (text or "").strip()
+    if not s or s[0] not in "{[":
+        return text
+    try:
+        v = json.loads(s)
+    except ValueError:
+        return text
+    if isinstance(v, dict):
+        got = _message_text(v)
+        if got is None and isinstance(v.get("output_text"), str) and v["output_text"].strip():
+            got = v["output_text"]
+        if got is None and isinstance(v.get("output"), list):
+            got = "\n\n".join(t for t in (_message_text(i) for i in v["output"]) if t) or None
+        if got is None and isinstance(v.get("choices"), list):
+            got = "\n\n".join(t for t in (_message_text(i) for i in v["choices"]) if t) or None
+    elif isinstance(v, list):
+        got = "\n\n".join(t for t in (_message_text(i) for i in v) if t) or None
+    else:
+        got = None
+    return got if got else text
+
+
 def save(task_dir: Path, run: str, turn: int | None, text: str, source: str = "gptpro", pack=None,
          chat_url: str | None = None, *, message_id: str | None = None) -> Path:
-    """Save one review. Text already saved (ignoring whitespace) returns the existing file instead."""
-    text = (text or "").strip()
+    """Save one review. Text already saved (ignoring whitespace) returns the existing file instead. A reply
+    pasted as the API's JSON (unwrap) is saved as the Markdown inside it."""
+    text = unwrap(text or "").strip()
     if not text:
         raise ValueError("an empty review")
     sha = _sha(text)
@@ -198,6 +242,36 @@ def _refresh_grading(task_dir: Path) -> None:
         grading.refresh(Path(task_dir), log=lambda *a: None)
     except Exception:
         pass
+
+
+REMOVED = ".removed"   # under reviews/: out of every reader's glob (list_reviews, the ledger), kept for a hand recovery
+
+
+def remove(task_dir: Path, name: str) -> dict:
+    """Take a saved review back (Austin re-enters one that was pasted wrong). The grading table forgets it first
+    (grading.forget_review), then the file and its extracted-findings sidecar move to reviews/.removed/<time>-<name>.
+    Returns the review's front matter with "name" and the table's "dropped" and "kept" row ids."""
+    task_dir = Path(task_dir)
+    if not name or name != Path(name).name or not name.endswith(".md"):
+        raise ValueError(f"not a review name: {name!r}")
+    p = reviews_dir(task_dir) / name
+    if not p.is_file():
+        raise FileNotFoundError(f"no saved review {name}")
+    fm, _ = _parse(p)
+    ref = f"{DIR}/{name}"
+    from . import grading
+    table = grading.forget_review(task_dir, ref)
+    with _locked(task_dir):
+        dest = reviews_dir(task_dir) / REMOVED
+        dest.mkdir(exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        side = p.with_suffix(".findings.json")
+        p.replace(dest / f"{stamp}-{name}")
+        if side.exists():
+            side.replace(dest / f"{stamp}-{side.name}")
+    stages.log(task_dir, "review_removed", run=fm.get("run"), turn=fm.get("turn"), source=fm.get("source"),
+               path=ref, dropped=table["dropped"], kept=table["kept"])
+    return {**{k: fm.get(k) for k in FIELDS}, "name": name, **table}
 
 
 # --- Chats and in-flight sends ------------------------------------------------------------------

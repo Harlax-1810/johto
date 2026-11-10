@@ -50,7 +50,7 @@ const KEYS = [
   ["Everywhere", [["⌘↵", "Do what Now shows first"], ["⌘⇧↵", "Primary action of this screen"], ["⌃`", "Open or close the lane"],
                   ["⌃⇧`", "Lane full width"], ["⌘K", "Commands"], ["⌥N", "Add a run note"]]],
   ["Lists", [["j / k", "Move through what's next"], ["↵", "Open"], ["x", "Hide until it changes"], ["t", "Task page"],
-             ["o", "Open in Studio"], ["/", "Search the code"], ["g h · g p · g s · g f", "Now, Find work, Slot map, Submitted"],
+             ["o", "Open in Studio"], ["/", "Search the code"], ["g h · g p · g a · g s · g f", "Now, Find work, Research, Slot map, Submitted"],
              ["⌘Z", "Undo a claim or drop"], ["?", "This list"]]],
   ["Writing", [["⌥1 – ⌥5", "Jump between fields"], ["⌥R", "Show or hide the reference pane"], ["Esc", "Leave the field"]]],
   ["Pick", [["c", "Claim"], ["← / →", "Slot variant"], ["r", "Check difficulty"], ["s", "Scout more"]]],

@@ -5,7 +5,7 @@ Austin's last sitting and `johto status` can show his minutes per task and stage
 
 Kinds in use (add new ones freely; readers ignore kinds they don't know):
   claimed, prompt_qc, lane_started, turn_ended, claude_waiting, budget_nudge, pack_built, review_sent,
-  review_unconfirmed, review_send_cleared, review_expired, review_saved, collected, kit_written,
+  review_unconfirmed, review_send_cleared, review_expired, review_saved, review_removed, collected, kit_written,
   grading_written, grading_marked, verify_done, draft_checked, studio_pulled, studio_pushed, submitted,
   focus_start, focus_stop, touch (Austin looked at the task: `johto where <t>`, the web card's first read and
   the helper-chat skill log this)

@@ -223,7 +223,7 @@ function Thread({ t, f }) {
   </li>`;
 }
 
-function codeLink(repo, commit, path) {
+export function codeLink(repo, commit, path) {
   const m = /^(.*?)(?::(\d+)(?:-(\d+))?)?$/.exec(path || "");
   if (!m || !repo || !commit) return null;
   const lines = m[2] ? `#L${m[2]}${m[3] ? `-L${m[3]}` : ""}` : "";

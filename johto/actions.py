@@ -40,7 +40,7 @@ HTTP_STATUS = {
     "needs_confirm": 409, "precondition_failed": 409, "lane_busy": 409, "lane_state": 409, "taken": 409,
     "claim_partial": 409, "busy": 409, "gh_account": 409, "conflict": 409, "sync_conflict": 409,
     "missing_fields": 422, "checklist_failed": 422, "guard_missing": 423, "blocked_overlap": 423,
-    "same_prompt": 409, "prompt_qc": 409,
+    "same_prompt": 409, "prompt_qc": 409, "no_slot": 409, "no_open_slot": 409, "slot_mismatch": 409,
     "studio_error": 502, "github": 502, "setup_failed": 500, "collect_failed": 500, "internal": 500,
 }
 
@@ -432,7 +432,35 @@ def recheck(task_id: str, expect_status: str, me_id: str | None = None) -> dict:
 
 
 def recheck_mine(d: Path) -> dict:
-    return recheck(workspace.load(d)["task_id"], "Writing")
+    meta = workspace.load(d)
+    need_slot(meta, d)
+    return recheck(meta["task_id"], "Writing")
+
+
+def need_slot(meta: dict, d: Path | None = None) -> None:
+    """Refuse a Studio action on a draft (a task folder with no Studio slot yet)."""
+    if workspace.is_draft(meta):
+        short = d.name if d is not None else workspace.short_name(meta.get("task_name") or "")
+        raise ActionError("no_slot", f"{short} has no Studio slot yet. Claim one first, from the task page's Submit "
+                          f"step or with `johto claim {short}`.", {"short": short, "slot": meta.get("slot")})
+
+
+def drafts() -> list[tuple[Path, dict]]:
+    """Every draft folder under tasks/ (no Studio slot yet, not dropped), with its task.json."""
+    out = []
+    for tj in sorted(config.TASKS.glob("*/task.json")):
+        try:
+            meta = json.loads(tj.read_text())
+        except (OSError, ValueError):
+            continue
+        if workspace.is_draft(meta) and not (meta.get("discarded") or meta.get("discard")):
+            out.append((tj.parent, meta))
+    return out
+
+
+def draft_open(meta: dict) -> int:
+    """How many open Studio tasks have exactly this draft's seeds, as of the last slots sync."""
+    return len(slot_tasks(meta.get("slot") or {}))
 
 
 # --- claim ----------------------------------------------------------------------------------------------
@@ -515,21 +543,8 @@ def claim(task_id: str, repo: dict, lead: dict | None = None, on_step=lambda ste
         d = workspace.create(t, slot, repo, lead)
         # What Studio already held (a previous writer's text): sync never pulls it in as Austin's.
         cf = after if isinstance(after, dict) else (t.get("custom_fields") or {})
-        extra = {"claimed_at": now_iso(), "studio_at_claim": sync.claim_baseline(cf),
-                 "feedback_at_claim": sync.h(cf.get("field_review_writer_feedback")) if sync.norm(
-                     cf.get("field_review_writer_feedback")) else ""}
-        if lead:
-            extra["lead_prev_status"] = lead.get("status")
-        if dossier:
-            extra["dossier"] = {"id": dossier.get("id"), "opportunity_id": (opportunity or {}).get("id")}
-            if origin:
-                extra["origin"] = {**origin, "dossier_id": dossier.get("id")}
-            if "## Dossier (AI research)" not in (d / "brief.md").read_text():
-                with open(d / "brief.md", "a") as fh:
-                    fh.write(opportunity_brief(dossier, opportunity))
-        if label:
-            extra["label"] = label
-        update_meta(d, lambda m: m.update(extra))
+        _finish_folder(d, lead=lead, dossier=dossier, opportunity=opportunity, label=label, origin=origin,
+                       extra={"claimed_at": now_iso(), **_claim_baseline(cf)})
     except Exception as e:
         raise ActionError("claim_partial", f"Claimed {name} in Studio, but making the task folder failed: {e}",
                           {**partial, "step": "making_folder"}) from e
@@ -540,6 +555,164 @@ def claim(task_id: str, repo: dict, lead: dict | None = None, on_step=lambda ste
     stages.log(d, "claimed", task_id=task_id, task_name=name, repo=repo["full_name"], lead=(lead or {}).get("id"),
                dossier=(dossier or {}).get("id"))
     return d
+
+
+def _claim_baseline(cf: dict) -> dict:
+    return {"studio_at_claim": sync.claim_baseline(cf),
+            "feedback_at_claim": sync.h(cf.get("field_review_writer_feedback")) if sync.norm(
+                cf.get("field_review_writer_feedback")) else ""}
+
+
+def _finish_folder(d: Path, *, lead: dict | None, dossier: dict | None, opportunity: dict | None,
+                   label: str | None, origin: dict | None, extra: dict) -> None:
+    """What a new task folder records beyond workspace.create: the lead's old status, the dossier and origin
+    (with the research appended to brief.md), the label, and `extra`."""
+    if lead:
+        extra["lead_prev_status"] = lead.get("status")
+    if dossier:
+        extra["dossier"] = {"id": dossier.get("id"), "opportunity_id": (opportunity or {}).get("id")}
+        if origin:
+            extra["origin"] = {**origin, "dossier_id": dossier.get("id")}
+        if "## Dossier (AI research)" not in (d / "brief.md").read_text():
+            with open(d / "brief.md", "a") as fh:
+                fh.write(opportunity_brief(dossier, opportunity))
+    if label:
+        extra["label"] = label
+    update_meta(d, lambda m: m.update(extra))
+
+
+# --- drafts: a task folder before any slot ------------------------------------------------------------------
+# A draft is prepared end to end without Studio (prompt, run, fields, reviews, grading, kit, checks). When a slot
+# with its seeds opens, bind() claims that slot; the web job around it then saves everything in one go.
+
+def draft(slot: dict, repo: dict, lead: dict | None = None, *, dossier: dict | None = None,
+          opportunity: dict | None = None, label: str | None = None, origin: dict | None = None) -> Path:
+    """Make tasks/<d-xxxxxx>/ with no Studio task behind it. `slot` names all five seeds the task is written for."""
+    check_repo_allowed(repo)
+    missing = [k for k in SLOT_KEYS if not (slot or {}).get(k)]
+    if missing:
+        raise ActionError("invalid", f"A draft needs every slot field; missing {', '.join(missing)}.")
+    short = workspace.new_draft_short()
+    t = {"task_id": None, "task_name": f"Draft {short}"}
+    d = workspace.create(t, {k: slot[k] for k in SLOT_KEYS}, repo, lead)
+    _finish_folder(d, lead=lead, dossier=dossier, opportunity=opportunity, label=label, origin=origin,
+                   extra={"draft": {"at": now_iso()}})
+    if lead:
+        mark_lead(lead["id"], "claimed", t["task_name"])
+    stages.log(d, "drafted", repo=repo["full_name"], lead=(lead or {}).get("id"), dossier=(dossier or {}).get("id"),
+               slot=slot_key(slot))
+    return d
+
+
+def shelve_draft(d: Path) -> dict:
+    """Delete a draft (his press): the folder moves to tasks/.drafts/<short>-<time>, so nothing is lost. Its lanes
+    must be gone first (clean()). The lead goes back to the status it had."""
+    meta = workspace.load(d)
+    if not workspace.is_draft(meta):
+        raise ActionError("invalid", f"{d.name} has a Studio slot; unclaim it in Studio instead.")
+    live = [r for r in meta.get("runs") or [] if r.get("container") and not r.get("torn_down_at")
+            and not r.get("collected_at")]
+    if live:
+        raise ActionError("lane_state", f"{d.name} still has a lane that isn't collected. Collect or clean it first.")
+    if meta.get("lead_id"):
+        mark_lead(meta["lead_id"], meta.get("lead_prev_status") or "new")
+    dest = config.TASKS / ".drafts" / f"{d.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    meta["deleted_at"] = now_iso()
+    workspace.save(d, meta)
+    d.rename(dest)
+    return {"short": d.name, "moved_to": str(dest)}
+
+
+def open_slot_for(slot: dict, exclude: set[str] | frozenset = frozenset(), live: bool = True) -> dict | None:
+    """The first open Studio task with exactly these seeds: the slots file first (rechecked live), then Studio's
+    available view. None when nothing is open (or Studio can't be read)."""
+    hit = next_open_in_group(slot, set(exclude))
+    if hit or not live:
+        return hit
+    key = slot_key(slot)
+    try:
+        avail = [t for t in S().list_tasks(view="available")
+                 if slot_key(S().slot_of(t)) == key and t["task_id"] not in exclude]
+    except studio.StudioError:
+        return None
+    return {"task_id": avail[0]["task_id"], "task_name": avail[0]["task_name"]} if avail else None
+
+
+BIND_STEPS = ["recheck", "claiming", "saving_repo", "binding"]
+
+
+def bind(d: Path, task_id: str | None = None, on_step=lambda step: None) -> dict:
+    """Claim an open Studio slot with the draft's seeds and attach it to this folder (the folder keeps its name).
+
+    Raises ActionError("no_open_slot") when nothing is open, ("taken", details={"alternative"}) when the slot went
+    to someone else first, ("slot_mismatch") when a named task has other seeds, or ("claim_partial") after the
+    claim. Returns {"task_id", "task_name"}."""
+    meta = workspace.load(d)
+    if not workspace.is_draft(meta):
+        raise ActionError("invalid", f"{d.name} already has a Studio slot ({meta.get('task_name')}).")
+    slot, repo = meta["slot"], meta["repo"]
+    check_repo_allowed(repo)
+    on_step("recheck")
+    me_id = me()
+    if not task_id:
+        hit = open_slot_for(slot)
+        if not hit:
+            raise ActionError("no_open_slot", f"No open slot for {slot_key(slot)} right now. Johto looks again every "
+                              "few minutes and says when one opens.", {"slot": slot})
+        task_id = hit["task_id"]
+    try:
+        t = recheck(task_id, "Ready to Claim", me_id)
+    except ActionError as e:
+        if e.code == "taken":
+            e.details["alternative"] = open_slot_for(slot, {task_id})
+        raise
+    have = S().slot_of(t)
+    if slot_key(have) != slot_key(slot):
+        raise ActionError("slot_mismatch", f"{t['task_name']} is {slot_key(have)}, not this task's {slot_key(slot)}.",
+                          {"task_id": task_id, "slot": have})
+    name = t["task_name"]
+    retry = S().status_name(t) == "Writing" and t.get("owned_by") == me_id
+    if not retry:
+        on_step("claiming")
+        try:
+            S().transition(task_id, config.CLAIM)
+        except studio.StudioError:
+            live = S().task(task_id)
+            if live.get("owned_by") not in (None, me_id):
+                raise ActionError("taken", f"{name} was just claimed by someone else.",
+                                  {"status": S().status_name(live), "owner": live.get("owned_by"),
+                                   "alternative": open_slot_for(slot, {task_id})}) from None
+            raise
+    partial = {"task_id": task_id, "task_name": name, "short": d.name}
+    on_step("saving_repo")
+    try:
+        after = S().patch_fields(task_id, repo_fields(repo))
+    except Exception as e:
+        raise ActionError("claim_partial", f"Claimed {name} in Studio for {d.name}, but saving the repo fields "
+                          f"failed: {e}", {**partial, "step": "saving_repo"}) from e
+    on_step("binding")
+    cf = after if isinstance(after, dict) else (t.get("custom_fields") or {})
+    at = now_iso()
+
+    def put(m):
+        m["task_id"], m["task_name"], m["claimed_at"] = task_id, name, at
+        m.update(_claim_baseline(cf))
+        m["drafted"] = {**(m.pop("draft", None) or {}), "bound_at": at}
+        m.pop("studio", None)
+    update_meta(d, put)
+    try:
+        b = d / "brief.md"
+        b.write_text(re.sub(r"^- Studio: no slot yet\..*$", f"- Studio: {studio.task_url(task_id)}", b.read_text(),
+                            count=1, flags=re.M))
+    except OSError:
+        pass
+    if meta.get("lead_id"):
+        mark_lead(meta["lead_id"], "claimed", name)
+    drop_from_slots(task_id)
+    stages.log(d, "claimed", task_id=task_id, task_name=name, repo=repo["full_name"], lead=meta.get("lead_id"),
+               dossier=(meta.get("dossier") or {}).get("id"), bound=True)
+    return {"task_id": task_id, "task_name": name}
 
 
 def undo_claim(d: Path) -> dict:
@@ -909,6 +1082,7 @@ def push(d: Path, run: str | None = None, checked: bool = False, task: dict | No
     `checked`: the caller re-read the task a moment ago (one recheck per composite job); pass that read as
     `task` so Studio's current text is compared without another GET."""
     meta = workspace.load(d)
+    need_slot(meta, d)
     t = task or (recheck(meta["task_id"], "Writing") if not checked else S().task(meta["task_id"]))
     # Edits made in Studio come in first, so saving never overwrites them.
     pulled = sync.pull(d, t.get("custom_fields") or {}, update_meta=update_meta)
@@ -930,7 +1104,10 @@ def push(d: Path, run: str | None = None, checked: bool = False, task: dict | No
 
 
 def pull_from_studio(d: Path, write_section=None, write_ratings=None) -> dict:
-    """Refresh the task's Studio status and, while it is mine and in Writing, bring Studio's edits in."""
+    """Refresh the task's Studio status and, while it is mine and in Writing, bring Studio's edits in. A draft
+    has nothing in Studio to read: {"status": "Draft", ...}."""
+    if workspace.is_draft(workspace.load(d)):
+        return {"status": "Draft", "pulled": [], "conflicts": {}}
     st = studio_status(d)
     if st["status"] != "Writing" or not st["mine"]:
         return {"status": st["status"], "pulled": [], "conflicts": {}}
@@ -1008,7 +1185,8 @@ def upload_gists(d: Path, run: str | None = None, on_step=lambda step: None) -> 
         raise ActionError("gh_account", f"gh is logged in as {acct!r}; switch with `gh auth switch -u {gists.GH_ACCOUNT}`.",
                           {"account": acct, "want": gists.GH_ACCOUNT})
     on_step("gists")
-    short = d.name
+    # The Studio task's code, not the folder: a task started as a draft keeps its d-xxxxxx folder after claiming.
+    short = workspace.short_name(meta.get("task_name")) if meta.get("task_id") else d.name
     try:
         if "conversation_log" in need:
             g["conversation_log"] = G().create(rec["transcript"], f"{short}-conversation.jsonl",
@@ -1061,6 +1239,7 @@ def start_qc(d: Path, spec: str = "AutoQC", checked: bool = False) -> str | None
     if spec not in config.QC_SPECS:
         raise ActionError("invalid", f"spec must be one of {', '.join(config.QC_SPECS)}.")
     meta = workspace.load(d)
+    need_slot(meta, d)
     # Studio's prompt as the audit starts, so lane_gate can tell which prompt it checked. `checked` callers
     # read or saved the task a moment ago, and that left the snapshot current.
     t = recheck(meta["task_id"], "Writing") if not checked else None
@@ -1538,7 +1717,11 @@ def lane_gate(d: Path, kind: str, *, again: bool = False, qc: bool = False, skip
     if kind != "validate":
         return out
     _guard_prompt_overlap(d)   # before anything reaches Studio or the lane
-    if skip_qc:
+    if workspace.is_draft(workspace.load(d)):
+        out["draft"] = True
+        log("No Studio slot yet, so Mercor's prompt check waits until you claim one. The run starts now.")
+        studio_prompt = None
+    elif skip_qc:
         log("warning: starting without the prompt AutoQC check (--skip-qc). If AutoQC later asks for a prompt "
             "change, you'll need another validation run.")
         studio_prompt = None
@@ -1593,6 +1776,7 @@ def submit(d: Path) -> None:
     """Re-read the task (Writing and mine), check that Trajectory Logs holds the submission run's transcript
     (from that same read), then Submit for Review."""
     meta = workspace.load(d)
+    need_slot(meta, d)
     t = recheck(meta["task_id"], "Writing")
     cf = t.get("custom_fields") if isinstance(t, dict) else None
     if isinstance(cf, dict):
@@ -1615,6 +1799,7 @@ def submit(d: Path) -> None:
 
 def unclaim(d: Path) -> None:
     meta = workspace.load(d)
+    need_slot(meta, d)
     recheck(meta["task_id"], "Writing")
     S().transition(meta["task_id"], config.UNCLAIM)
     update_meta(d, lambda m: m.update(unclaimed_at=now_iso(), studio={**(m.get("studio") or {}),
@@ -1668,7 +1853,7 @@ def discard(d: Path, reason: str = "easy", unclaim_first: bool = True, on_step=l
     pre-filled Discarded Run Log link. {"url", "removed", "skipped", "unclaimed"}."""
     meta = workspace.load(d)
     unclaimed = False
-    if unclaim_first:
+    if unclaim_first and not workspace.is_draft(meta):
         on_step("recheck")
         t = S().task(meta["task_id"])
         if S().status_name(t) == "Writing" and t.get("owned_by") == me():
@@ -1770,6 +1955,7 @@ def studio_snapshot(d: Path) -> dict | None:
 def studio_status(d: Path) -> dict:
     """GET the task: {status, owner, mine, feedback, times_submitted, fields}; cached in task.json."""
     meta = workspace.load(d)
+    need_slot(meta, d)
     t = S().task(meta["task_id"])
     cf = t.get("custom_fields") or {}
     out = {"status": S().status_name(t), "owner": t.get("owned_by"), "mine": t.get("owned_by") == me(),
@@ -1857,13 +2043,17 @@ def trajectory_row(d: Path, run: str | None = None, meta: dict | None = None) ->
     """The checklist row for the Trajectory Logs upload. Missing, or another run's transcript, blocks submit."""
     meta = meta or workspace.load(d)
     ts = trajectory_state(d, run, meta)
-    url = studio.task_url(meta["task_id"])
+    url = studio.task_url(meta["task_id"]) if meta.get("task_id") else None
     when = f" (Studio as of {_hhmm(ts['at'])})" if ts.get("at") else ""
     fix = {"action": "open_studio", "url": url, "path": ts["path"], "then": "studio_refresh"}
     run = ts["run"]
     if ts["status"] == "uploaded":
         return _row("trajectory_logs", "pass", "Trajectory Logs", f"{run}'s transcript is in Studio{when}",
                     files=ts["files"])
+    if workspace.is_draft(meta):
+        return _row("trajectory_logs", "pending", "Trajectory Logs wait for a slot",
+                    f"Upload {ts['path'] or 'the transcript'} to Trajectory Logs in Studio once a slot is claimed.",
+                    path=ts["path"])
     if ts["status"] == "no_snapshot":
         return _row("trajectory_logs", "pending", "Trajectory Logs not checked",
                     "Refresh from Studio to see whether the transcript is uploaded.",
@@ -1939,6 +2129,13 @@ def checklist(d: Path, run: str | None = None) -> list[dict]:
     sub = workspace.parse_submission(d)
     slot = meta["slot"]
     rows = []
+    draft = workspace.is_draft(meta)
+    if draft:
+        n = draft_open(meta)
+        rows.append(_row("slot", "pending", "No Studio slot yet",
+                         (f"{n} open slot{'s' if n != 1 else ''} match{'es' if n == 1 else ''}. " if n else
+                          "No open slot matches right now. ") + "Claiming one saves every field and the gists to "
+                         "Studio and runs AutoQC.", fix={"action": "claim_slot", "args": {}}, open=n))
 
     # AutoQC
     q = latest_qc(meta)
@@ -1971,7 +2168,9 @@ def checklist(d: Path, run: str | None = None) -> list[dict]:
 
     # Studio sync
     now_fields = fields(d, run)
-    if not pushed.get("at"):
+    if draft:
+        pass   # the slot row above says it: nothing reaches Studio before a slot is claimed
+    elif not pushed.get("at"):
         rows.append(_row("studio_sync", "pending", "Not saved to Studio yet",
                          "Saving uploads the gists, saves every field and runs AutoQC",
                          fix={"action": "studio_save", "args": {}}))

@@ -33,7 +33,7 @@ class Base(unittest.TestCase):
             p.start()
         fake.reset()
         fake.QC_DELAY_S = 0
-        fake_gh.ACCOUNT = "austeane"
+        fake_gh.ACCOUNT = fake_gh.GH_ACCOUNT
         fake_gh.CREATED.clear()
         lead = actions.load_lead(fx.LEAD_ID)
         repo = actions.repo_info(lead["repo"], lead["commit"], lead["primary_language"])
@@ -45,10 +45,12 @@ class Base(unittest.TestCase):
         fake.reset()
         self.tmp.cleanup()
 
-    def run_(self, kind: str) -> str:
-        run_dir = fake_lanes.new_lane(self.d, kind)
+    def run_(self, kind_or_dir, kind: str | None = None) -> str:
+        d = self.d if kind is None else kind_or_dir
+        kind = kind or kind_or_dir
+        run_dir = fake_lanes.new_lane(d, kind)
         fx.fake_claude(run_dir, fx.PROMPT)
-        actions.collect(self.d, run_dir.name)
+        actions.collect(d, run_dir.name)
         return run_dir.name
 
 
@@ -325,17 +327,24 @@ class StudioTab(unittest.TestCase):
     def run_script(self, tabs, sessions):
         import io, contextlib
         from johto import studio
-        used, opened = [], []
+        used, opened, started, polls = [], [], [], []   # ...and a poll reads the answer, null once first
 
         def js(expr, target_id=None):
             used.append(target_id)
             if "Clerk.session)" in expr and "getToken" not in expr:
                 return sessions.get(target_id, False)
+            if "getToken" in expr:                  # the fetch starts in the tab...
+                started.append(target_id)
+                return True
+            if not polls:                           # ...and the first poll finds nothing yet
+                polls.append(target_id)
+                return None
             return json.dumps({"status": 200, "body": "{}", "version": None})
 
         script = studio._SCRIPT % {"req": json.dumps({"method": "GET", "url": "u", "body": None, "campaign": "c",
                                                       "company": "co", "account": "a"}),
-                                   "account": "me@x", "start": "https://studio.mercor.com/start", "mark": studio.MARK}
+                                   "account": "me@x", "start": "https://studio.mercor.com/start", "mark": studio.MARK,
+                                   "timeout": 30}
         ns = {"list_tabs": lambda include_chrome=True: tabs, "js": js,
               "new_tab": lambda url, account=None: opened.append(url) or "new"}
         out = io.StringIO()
@@ -361,3 +370,128 @@ class StudioTab(unittest.TestCase):
         last, opened, _ = self.run_script([], {"new": True})
         self.assertEqual(opened, ["https://studio.mercor.com/start"])
         self.assertEqual(last, "new")
+
+
+class Drafts(Base):
+    """A task folder before any slot: prepared end to end locally, then bound to an open slot."""
+
+    def draft(self) -> Path:
+        lead = actions.load_lead(fx.LEAD_ID)
+        repo = actions.repo_info(lead["repo"], lead["commit"], lead["primary_language"])
+        return actions.draft(fx.SLOT, repo, lead)
+
+    def test_a_draft_has_no_task_id_and_every_local_step_works(self):
+        d = self.draft()
+        meta = workspace.load(d)
+        self.assertTrue(d.name.startswith("d-"))
+        self.assertIsNone(meta["task_id"])
+        self.assertTrue(workspace.is_draft(meta))
+        self.assertEqual(meta["slot"], fx.SLOT)
+        self.assertIn("no slot yet", (d / "brief.md").read_text())
+        self.assertEqual(workspace.resolve(d.name), d)
+        # The lane starts without Studio: no prompt check to wait for.
+        fx.write_fixture_text(d)
+        gate = actions.lane_gate(d, "validate")
+        self.assertTrue(gate["draft"])
+        self.assertFalse(gate["checked"])
+        run_dir = fake_lanes.new_lane(d, "validate")
+        fx.fake_claude(run_dir, fx.PROMPT)
+        actions.collect(d, run_dir.name)
+        rows = {r["key"]: r for r in actions.checklist(d)}
+        self.assertEqual(rows["slot"]["status"], "pending")
+        self.assertEqual(rows["slot"]["fix"]["action"], "claim_slot")
+        self.assertEqual(rows["slot"]["open"], 2)   # three in the fixture, one claimed in setUp
+        self.assertNotIn("studio_sync", rows)
+        self.assertEqual(rows["trajectory_logs"]["status"], "pending")
+        # Nothing reaches Studio before a slot is claimed.
+        with self.assertRaises(ActionError) as cm:
+            actions.push(d)
+        self.assertEqual(cm.exception.code, "no_slot")
+        with self.assertRaises(ActionError):
+            actions.start_qc(d)
+        self.assertEqual(actions.pull_from_studio(d)["status"], "Draft")
+        self.assertEqual([x.name for x, _ in actions.drafts()], [d.name])
+
+    def test_bind_claims_a_matching_open_slot_and_keeps_the_folder(self):
+        d = self.draft()
+        fx.write_fixture_text(d)
+        res = actions.bind(d)
+        self.assertEqual(res["task_id"], fx.TASKS[1]["task_id"])   # TASKS[0] went to Base.setUp's claim
+        meta = workspace.load(d)
+        self.assertEqual(meta["task_id"], res["task_id"])
+        self.assertEqual(meta["task_name"], fx.TASKS[1]["task_name"])
+        self.assertFalse(workspace.is_draft(meta))
+        self.assertNotIn("draft", meta)
+        self.assertTrue(meta["drafted"]["bound_at"])
+        self.assertIn("studio_at_claim", meta)
+        self.assertTrue(d.exists())
+        self.assertIn(res["task_id"], (d / "brief.md").read_text())
+        t = fake.task(res["task_id"])
+        self.assertEqual(fake.status_name(t), "Writing")
+        self.assertEqual(t["custom_fields"]["field_repo_name"], "acme/widget")
+        # The slots file no longer counts it.
+        self.assertNotIn(res["task_id"], [x["task_id"] for x in actions.slot_tasks(fx.SLOT)])
+        # Now the usual Studio path works: every field saved.
+        pushed = actions.push(d)
+        self.assertIn("field_high_level_goal", pushed["fields"])
+        self.assertEqual(fake.task(res["task_id"])["custom_fields"]["field_opening_prompt"], fx.PROMPT)
+        with self.assertRaises(ActionError) as cm:
+            actions.bind(d)
+        self.assertEqual(cm.exception.code, "invalid")
+
+    def test_bind_refuses_without_an_open_slot_and_a_wrong_seed(self):
+        d = self.draft()
+        for t in fx.TASKS[1:]:
+            fake.take(t["task_id"])
+        with self.assertRaises(ActionError) as cm:
+            actions.bind(d)
+        self.assertEqual(cm.exception.code, "no_open_slot")
+        self.assertTrue(workspace.is_draft(workspace.load(d)))
+        with self.assertRaises(ActionError) as cm:
+            actions.bind(d, fx.OTHER["task_id"])    # Explicit spec, not the draft's Casual prose
+        self.assertEqual(cm.exception.code, "slot_mismatch")
+        self.assertEqual(fake.status_name(fake.task(fx.OTHER["task_id"])), "Ready to Claim")
+
+    def test_a_draft_lane_gets_a_task_name_prework_accepts(self):
+        d = self.draft()
+        name = workspace.lane_task(workspace.load(d), d)
+        self.assertRegex(name, r"^Task [a-z0-9]{8}$")          # prework.py's rule: 'Task' + 8 letters or digits
+        self.assertTrue(name.startswith("Task " + d.name.replace("-", "")), name)
+        meta = workspace.load(d)
+        meta["task_id"], meta["task_name"] = "task_" + "0" * 32, "Task ab12cd34"
+        self.assertEqual(workspace.lane_task(meta, d), "Task ab12cd34")   # a claimed task keeps Studio's name
+
+    def test_shelving_a_draft_moves_it_aside(self):
+        leads = self.root / "data/scout/leads.json"
+        before = json.loads(leads.read_text())[0]["status"]
+        d = self.draft()
+        res = actions.shelve_draft(d)
+        self.assertFalse(d.exists())
+        self.assertTrue(Path(res["moved_to"]).exists())
+        self.assertEqual(json.loads(leads.read_text())[0]["status"], before)   # the lead goes back as it was
+
+    def test_the_cli_starts_a_draft_and_claims_it(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["start", "--lead", fx.LEAD_ID, "--draft", "--mode", "Interactive/pairing", "--yes"])
+        short = next(l for l in out.getvalue().splitlines() if l.startswith("Draft:")).split()[1]
+        d = self.root / "tasks" / short
+        self.assertTrue(workspace.is_draft(workspace.load(d)))
+        fx.write_fixture_text(d)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.run_(d, "validate")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["claim", short, "--yes"])
+        text = out.getvalue()
+        self.assertIn("Claimed", text)
+        self.assertIn("Saved", text)
+        meta = workspace.load(d)
+        self.assertFalse(workspace.is_draft(meta))
+        self.assertTrue(meta["gists"].get("conversation_log"))
+        self.assertEqual(fake.task(meta["task_id"])["custom_fields"]["field_high_level_goal"],
+                         fx.FIXTURE_TEXT["High-Level Task Goal"])
+        self.assertEqual(meta["qc"][-1]["spec"], "AutoQC")
+        with self.assertRaises(SystemExit):
+            with contextlib.redirect_stdout(io.StringIO()):
+                cli.main(["claim", short, "--yes"])

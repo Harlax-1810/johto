@@ -5,6 +5,7 @@ actions on a fixture change only an in-memory copy.
 
 PUT /api/dossiers/worker {"paused": true} also stops a running generation (it shares Austin's
 subscription with his lanes) and queues it again; {"paused": true, "stop": false} lets it finish.
+{"model": "codex"} (or "claude") picks who writes the next dossiers; a running one keeps its model.
 The app's lifespan calls start_worker() on startup and stop_worker() on shutdown.
 """
 from __future__ import annotations
@@ -206,6 +207,12 @@ async def refill(req: Request):
 @guarded
 async def put_worker(req: Request):
     b = await _body(req)
+    if "model" in b and "paused" not in b:
+        if b["model"] not in worker.MODELS:
+            raise ValueError(f"model must be one of {', '.join(worker.MODELS)}")
+        await asyncio.to_thread(worker.set_model, b["model"])
+        st = await asyncio.to_thread(worker.status)
+        return JSONResponse({"worker": st, "model": st["model"], "model_word": worker.MODELS[st["model"]]})
     if not isinstance(b.get("paused"), bool):
         raise ValueError("paused must be true or false")
     stop = b.get("stop", True)

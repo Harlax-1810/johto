@@ -134,6 +134,83 @@ class SaveFillsGrading(Base):
         self.assertEqual(len([r for r in rows if r["sources"][0]["type"] == "review"]), 3)
 
 
+class Unwrap(Base):
+    """A reply pasted as the API's JSON is saved as the Markdown inside it; anything else is saved as it came."""
+
+    def test_a_responses_api_message_object(self):
+        from johto import grading
+        from test_grading import REPLY1
+        wrapped = json.dumps({"id": "msg_1", "type": "message", "status": "completed", "role": "assistant",
+                              "content": [{"type": "output_text", "annotations": [], "text": REPLY1}]})
+        p = reviews.save(self.d, "validate-1", 1, wrapped)
+        self.assertEqual(reviews.body(p).strip(), REPLY1.strip())
+        self.assertEqual(reviews.digest(reviews.body(p)), "First review.")
+        self.assertEqual([f["id"] for f in reviews.findings(reviews.body(p))], ["F1", "F2", "F3"])
+        self.assertEqual(len([r for r in grading.load(self.d)["rows"] if r["sources"][0]["type"] == "review"]), 3)
+        # The same reply as plain Markdown is the same review.
+        self.assertEqual(reviews.save(self.d, "validate-1", 1, REPLY1), p)
+
+    def test_other_api_shapes(self):
+        whole = {"object": "response", "output": [{"type": "reasoning", "summary": []},
+                                                   {"type": "message", "role": "assistant",
+                                                    "content": [{"type": "output_text", "text": "## Digest\n\nA.\n"}]}]}
+        self.assertEqual(reviews.unwrap(json.dumps(whole)).strip(), "## Digest\n\nA.")
+        self.assertEqual(reviews.unwrap(json.dumps({"output_text": "## Digest\n\nB.\n"})).strip(), "## Digest\n\nB.")
+        self.assertEqual(reviews.unwrap(json.dumps([whole["output"][1]])).strip(), "## Digest\n\nA.")
+        chat = {"choices": [{"index": 0, "message": {"role": "assistant", "content": "## Digest\n\nC.\n"}}]}
+        self.assertEqual(reviews.unwrap(json.dumps(chat)).strip(), "## Digest\n\nC.")
+
+    def test_not_a_wrapper_is_left_alone(self):
+        bare = json.dumps([{"id": "F1", "finding": "x", "kind": "defect"}])
+        self.assertEqual(reviews.unwrap(bare), bare)
+        self.assertEqual(reviews.unwrap(REPLY), REPLY)
+        self.assertEqual(reviews.unwrap("{not json"), "{not json")
+        self.assertEqual(reviews.unwrap(json.dumps({"type": "message", "content": []})), json.dumps({"type": "message", "content": []}))
+
+
+class Remove(Base):
+    @staticmethod
+    def _from_review(rows):
+        return [r for r in rows if any(s.get("type") == "review" for s in r.get("sources") or [])]
+
+    def test_a_removed_review_leaves_the_folder_and_the_table_but_not_his_marks(self):
+        """Re-entering a review pasted wrong: the file goes aside, its unmarked rows go, a marked row stays and
+        takes the re-entered finding with the same ID, so the mark survives."""
+        from johto import grading
+        from test_grading import REPLY1
+        p = reviews.save(self.d, "validate-1", 1, REPLY1)
+        first, *others = [r["id"] for r in self._from_review(grading.load(self.d)["rows"])]
+        self.assertEqual(len(others), 2)
+        grading.mark(self.d, [first], goal=True)
+        out = reviews.remove(self.d, p.name)
+        self.assertEqual((out["run"], out["turn"], sorted(out["dropped"]), out["kept"]),
+                         ("validate-1", 1, sorted(others), [first]))
+        self.assertEqual(reviews.list_reviews(self.d), [])
+        self.assertEqual(len(list((reviews.reviews_dir(self.d) / reviews.REMOVED).glob(f"*-{p.name}"))), 1)
+        rows = {r["id"]: r for r in grading.load(self.d)["rows"]}
+        self.assertIn(first, rows)
+        self.assertFalse(any(x in rows for x in others))
+        self.assertEqual(self._from_review(rows.values()), [])
+        self.assertEqual(stages.last(self.d, "review_removed")["path"], f"reviews/{p.name}")
+        reviews.save(self.d, "validate-1", 1, REPLY1.replace("First review", "Second reading"))
+        rows = {r["id"]: r for r in grading.load(self.d)["rows"]}
+        again = [r["id"] for r in self._from_review(rows.values())]
+        self.assertEqual(len(again), 3)
+        self.assertIn(first, again)
+        self.assertTrue(rows[first]["marks"]["goal"])
+        self.assertFalse(any(x in rows for x in others))
+
+    def test_only_a_plain_name_inside_the_folder(self):
+        reviews.save(self.d, "validate-1", 1, REPLY)
+        with self.assertRaises(ValueError):
+            reviews.remove(self.d, "../task.json")
+        with self.assertRaises(ValueError):
+            reviews.remove(self.d, "pending.json")
+        with self.assertRaises(FileNotFoundError):
+            reviews.remove(self.d, "validate-9-t01-gptpro.md")
+        self.assertEqual(len(reviews.list_reviews(self.d)), 1)
+
+
 class Add(Base):
     def test_turn_comes_from_the_newest_pack(self):
         self.full_pack()

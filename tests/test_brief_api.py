@@ -120,7 +120,7 @@ class WorkerHook(FakeClaude):
         doc = json.loads(store.dossier_path(DID).read_text())
         res = generate.Result(ok=True, doc=doc, cost_usd=1.0, elapsed_s=10, model="m", passes=1)
         with mock.patch.object(worker.generate, "generate", lambda *a, **k: res):
-            worker.run_item(DID)
+            worker.run_item(DID, model="claude")   # whatever the real settings say
         self.assertEqual(brief.state(DID), "queued")
 
     def test_start_queues_missing_and_stale_briefs(self):

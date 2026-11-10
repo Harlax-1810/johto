@@ -750,8 +750,10 @@ def _research(idx: dict, pairs: list, demo: bool) -> dict:
         line = f"Research rests while {target} repos are ready."
     else:
         line = f"Research is filling up: {ready} of {target} ready."
+    model = w.get("model") or "claude"
     return {"paused": paused, "ready": ready, "target": target, "generating": name,
-            "queued": sum(1 for i in items if i.get("status") == "queued"), "today_line": line}
+            "queued": sum(1 for i in items if i.get("status") == "queued"), "today_line": line,
+            "model": model, "model_word": MODEL_WORDS.get(model, model)}
 
 
 def _set_aside(pairs: list) -> list[dict]:
@@ -870,7 +872,113 @@ def slot_map(demo: bool) -> dict:
             "open_total": sum(slots.combos.values())}
 
 
+# --- GET /api/research: every researched problem, one row each ---------------------------------------------
+
+SIZE_RANK = {"L": 0, "M": 1, "S": 2}
+MODEL_WORDS = {"claude": "Claude Code", "codex": "Codex CLI"}
+
+
+def researcher(doc: dict | None) -> str:
+    """Who wrote a dossier, from its model field: "GPT" (an OpenAI model, through the Codex CLI) or "Claude"."""
+    m = str((doc or {}).get("model") or "").lower()
+    return "GPT" if m.startswith(("gpt", "o1", "o3", "o4", "codex")) else "Claude"
+ONE_SHOT_RANK = {"unlikely": 0, "possible": 1, "likely": 2, "not_checked": 3}
+
+
+def _overview(doc: dict | None) -> dict:
+    b = next((b for b in (doc or {}).get("blocks") or [] if b.get("type") == "overview"), {})
+    size = b.get("size") or {}
+    return {"languages": [l for l in size.get("languages") or [] if isinstance(l, str)][:3],
+            "source_files": size.get("source_files") if isinstance(size.get("source_files"), int) else None}
+
+
+def _problem_rows(it: dict, doc: dict, slots: Slots, tasks: list[dict], demo: bool) -> list[dict]:
+    """One row per opportunity in a dossier: the brief's words when it has them, the dossier's otherwise."""
+    did, repo = it["id"], doc.get("repo") or it.get("repo") or ""
+    brief = load_brief(did, demo)
+    b = enrich(brief, doc, slots, tasks, did, demo) if brief is not None else None
+    seeds = {x.get("opportunity_id"): x for x in (b or {}).get("seeds") or []}
+    mine = {u.get("id"): u for u in _used(did, repo, tasks, b) if u.get("kind") == "seed" and u.get("id")}
+    facts = (b or {}).get("facts") if isinstance((b or {}).get("facts"), dict) else repo_facts(doc)
+    ov = _overview(doc)
+    verdict = ((b or {}).get("verdict") or {}).get("level")
+    promise = (doc.get("verdict") or {}).get("promise")
+    name = _name(doc, brief, repo)
+    who = researcher(doc)
+    out = []
+    for o in _opps(doc):
+        oid = o.get("id")
+        seed = seeds.get(oid) or {}
+        view = _opp_view(o, slots)
+        fits = seed.get("fits") if seed.get("fits") and all("variants" in f for f in seed["fits"]) else view["fits"]
+        traps = [t for t in o.get("where_models_fail") or [] if isinstance(t, str)]
+        trap = seed.get("models_miss") or (hide_code(traps[0]) if traps else None) or None
+        up = view["upstream"]
+        used = mine.get(oid)
+        out.append({
+            "id": f"{did}:{oid}", "dossier_id": did, "opportunity_id": oid,
+            "repo": repo, "owner": repo.split("/")[0], "name": name,
+            "verdict": verdict, "promise": promise, "seed": oid in seeds,
+            "title": seed.get("title") or view["title"],
+            "problem": seed.get("problem") or view["summary"],
+            "trap": trap, "area": view["area"],
+            "one_shot": view["one_shot"], "size": view["size"],
+            "fits": fits,
+            "fit_keys": list(dict.fromkeys(key_str(f) for f in fits)),
+            "actions": list(dict.fromkeys(f.get("action") for f in fits if f.get("action"))),
+            "domains": list(dict.fromkeys(f.get("domain") for f in fits if f.get("domain"))),
+            "scales": list(dict.fromkeys(f.get("codebase_type") for f in fits if f.get("codebase_type"))),
+            "open": max((int(f.get("open") or 0) for f in fits), default=0),
+            "traps": len(traps), "evidence": len(o.get("evidence") or []),
+            "needs": [n for n in (o.get("self_contained") or {}).get("needs") or [] if isinstance(n, str)][:4],
+            "upstream": len(up), "upstream_open": sum(1 for u in up if u.get("state") == "open"),
+            "yours": {"short": used["short"], "stage": used.get("stage"), "stage_word": used.get("stage_word")} if used else None,
+            "languages": ov["languages"], "source_files": ov["source_files"],
+            "fails": list(facts.get("fails") or []),
+            "generated_at": (brief or {}).get("generated_at") or doc.get("generated_at"),
+            "researcher": who,
+        })
+    return out
+
+
+def _research_lede(rows: list[dict], repos: int) -> dict:
+    if not rows:
+        return {"title": "No problems are researched yet.", "support": None}
+    hard = sum(1 for r in rows if r["one_shot"] == "unlikely")
+    withslot = sum(1 for r in rows if r["open"])
+    n, k = len(rows), repos
+    title = f"{n} researched problem{'s' if n != 1 else ''} across {k} repo{'s' if k != 1 else ''}."
+    parts = []
+    if hard:
+        parts.append(f"{hard} where Claude is unlikely to get it in one go")
+    parts.append(f"{withslot} with an open slot right now" if withslot else "none with an open slot right now")
+    support = ", ".join(parts) + "."
+    return {"title": title, "support": support[:1].upper() + support[1:]}
+
+
+def research(demo: bool) -> dict:
+    """Every problem the research found, across every ready repo, flat: the research dashboard's rows."""
+    slots = Slots()
+    tasks = demo_tasks() if demo else load_tasks()
+    _, pairs = _items(demo)
+    rows: list[dict] = []
+    repos = 0
+    for it, doc in pairs:
+        if doc is None or it.get("status") not in ("ready", "actioned"):
+            continue
+        repos += 1
+        rows += _problem_rows(it, doc, slots, tasks, demo)
+    rows.sort(key=lambda r: (VERDICT_RANK.get(r["verdict"], 2), ONE_SHOT_RANK.get(r["one_shot"], 3),
+                             0 if r["seed"] else 1, SIZE_RANK.get(r["size"], 3), -r["open"], r["name"].lower(), r["opportunity_id"]))
+    return {"lede": _research_lede(rows, repos), "slots": slots.cells, "synced": synced_words(slots.synced_at),
+            "repos": repos, "problems": rows}
+
+
 # --- routes ------------------------------------------------------------------------------------------------
+
+async def get_research(req: Request):
+    return JSONResponse(await asyncio.to_thread(research, _demo(req)))
+
 
 async def get_discover(req: Request):
     return JSONResponse(await asyncio.to_thread(discover, _demo(req)))
@@ -892,6 +1000,7 @@ routes: list = [
     Route("/api/discover", get_discover),
     Route("/api/discover/{id}", get_detail),
     Route("/api/slots/map", get_slot_map),
+    Route("/api/research", get_research),
 ]
 
 

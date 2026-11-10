@@ -310,7 +310,7 @@ class QueueTests(Base):
     async def test_state_shape(self):
         st = await self.svc.refresh()
         for k in ("state", "rate_limited", "since", "run", "pty", "question", "evidence", "facts", "input_locked",
-                  "queue", "auto_prepare", "foreign"):
+                  "queue", "auto_prepare", "foreign", "login_url"):
             self.assertIn(k, st)
         self.assertEqual(st["state"], "free")
 

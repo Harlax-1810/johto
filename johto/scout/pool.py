@@ -25,7 +25,6 @@ from .. import config
 from . import discover, github, vet
 
 POOL_FILE = config.DATA / "scout" / "pool.json"
-SLOTS_FILE = config.DATA / "slots.json"
 CTYPES = ("Personal-scale", "Enterprise-grade")
 CTYPE_SHORT = {"Personal-scale": "personal-scale", "Enterprise-grade": "enterprise-grade"}
 DOMAINS = ("Backend / API", "Web frontend", "DevOps / cloud", "Dev tooling", "Data / DB", "Games",
@@ -97,7 +96,7 @@ _DOMAIN_RX_TEXT = {d: re.compile(rf"\b({w})\b", re.I) for d, w in DOMAIN_WORDS.i
 def _open_slots() -> dict:
     """Open slot counts by (action, domain, ctype) and (domain, ctype), from data/slots.json only."""
     try:
-        groups = json.loads(SLOTS_FILE.read_text()).get("groups", [])
+        groups = json.loads((config.DATA / "slots.json").read_text()).get("groups", [])
     except (OSError, json.JSONDecodeError):
         groups = []
     combo: dict[tuple, int] = {}
@@ -573,7 +572,7 @@ def snapshot(path=POOL_FILE) -> dict:
     everything = _all(include_excluded=True)
     eligible = [a for a in everything if a["eligible"]]
     try:
-        synced = json.loads(SLOTS_FILE.read_text()).get("synced_at")
+        synced = json.loads((config.DATA / "slots.json").read_text()).get("synced_at")
     except (OSError, json.JSONDecodeError):
         synced = None
     doc = {

@@ -541,6 +541,7 @@ class LaneService:
                "foreign": {"container": p["foreign"][0]} if p.get("foreign") else None,
                "launchable": launchable, "session": bool(look.get("session")),
                "input": ({"visible": scr["input_visible"], "empty": not scr["input_text"]} if scr else None),
+               "login_url": (scr or {}).get("login_url") if state == "needs_login" else None,
                "job": prep, "monitor": self._monitor(info)}
         old = self._state
         self._state = new

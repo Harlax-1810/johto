@@ -47,11 +47,11 @@ function meta(kind, size, oneShot) {
 const usedFor = (used, kind, id) => (used || []).find((u) => u.kind === kind && u.id === id) || null;
 
 /** A seed from the brief (or, before the brief exists, one of the research's first problems). */
-export function SeedInspector({ d, seed, onClose, claimRef }) {
+export function SeedInspector({ d, seed, onClose, claimRef, draftRef }) {
   const det = seed.detail;
   const kind = actionWord(seed.fits?.[0]?.action);
   return html`<${Inspector} onClose=${onClose} tag=${TAG} title=${seed.title} meta=${meta(kind, seed.size, seed.one_shot)} label=${seed.title}
-    foot=${html`<${ClaimPanel} dossierId=${d.id} repo=${d.repo} fits=${seed.fits} claimRef=${claimRef}
+    foot=${html`<${ClaimPanel} dossierId=${d.id} repo=${d.repo} fits=${seed.fits} claimRef=${claimRef} draftRef=${draftRef}
       used=${usedFor(d.used, "seed", seed.opportunity_id)}
       what=${{ kind: "seed", opportunity_id: seed.opportunity_id, title: seed.title }} />`}><div class="rb-ib">
     ${det?.models_wrong?.length ? html`<${Sec} title="Where Claude tends to go wrong"><${Bullets} items=${det.models_wrong} n=${3} /><//>` : null}
@@ -66,11 +66,11 @@ export function SeedInspector({ d, seed, onClose, claimRef }) {
 }
 
 /** A place to explore: material for his own direction, never a task. */
-export function PlaceInspector({ d, place, onClose, claimRef, onSeed }) {
+export function PlaceInspector({ d, place, onClose, claimRef, draftRef, onSeed }) {
   const near = place.near_seed && ([...(d.brief?.seeds || []), ...(d.also_researched || [])].find((s) => s.opportunity_id === place.near_seed));
   return html`<${Inspector} onClose=${onClose} tag=${TAG} title=${place.name} label=${place.name}
     meta=${html`<span>Your own direction</span><${OneGo} v="not_checked" />`}
-    foot=${html`<${ClaimPanel} dossierId=${d.id} repo=${d.repo} fits=${place.fits} claimRef=${claimRef}
+    foot=${html`<${ClaimPanel} dossierId=${d.id} repo=${d.repo} fits=${place.fits} claimRef=${claimRef} draftRef=${draftRef}
       used=${usedFor(d.used, "place", place.id)}
       what=${{ kind: "place", place_id: place.id, name: place.name }} />`}><div class="rb-ib">
     <${Sec} title="What's there today">

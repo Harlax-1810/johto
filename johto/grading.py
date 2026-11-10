@@ -755,6 +755,36 @@ def refresh(task_dir: Path, run: str | None = None, log=print, *, extract: bool 
     return data
 
 
+def forget_review(task_dir: Path, ref: str) -> dict:
+    """Take one saved review out of the table before its file goes (reviews.remove): its sources leave every
+    row, and a row left with no source and no mark of Austin's is dropped. A marked row stays, keys and all,
+    so his marks survive a re-entered review whose findings keep their IDs. {"dropped": [ids], "kept": [ids]}."""
+    d = Path(task_dir)
+    dropped, kept = [], []
+    with _locked(d):
+        data = load(d)
+        rows = []
+        for r in data["rows"]:
+            srcs = r.get("sources") or []
+            left = [s for s in srcs if not (s.get("type") == "review" and s.get("ref") == ref)]
+            if len(left) == len(srcs):
+                rows.append(r)
+                continue
+            r["sources"] = left
+            if left or (r.get("marks") or {}).get("selected"):
+                kept.append(r["id"])
+                rows.append(r)
+            else:
+                dropped.append(r["id"])
+        if dropped or kept:
+            data["rows"] = rows
+            data["updated_at"] = _now()
+            save(d, data)
+    if dropped or kept:
+        stages.log(d, "grading_written", run=data.get("run"), rows=len(rows), forgot=ref, dropped=dropped)
+    return {"dropped": dropped, "kept": kept}
+
+
 # --- Austin's marks ------------------------------------------------------------------------------------
 
 def mark(task_dir: Path, ids, *, selected=UNSET, goal=UNSET, dp=UNSET, notes=UNSET, scope=UNSET) -> list[dict]:

@@ -84,6 +84,7 @@ export function RailNav() {
     </div>
     <a class=${`navlink ${r === "/" ? "on" : ""}`} href="/" onClick=${link("/")}>Now${waiting ? html`<span class="count" title="Waiting on you">${waiting}</span>` : null}</a>
     <a class=${`navlink ${r.startsWith("/repos") ? "on" : ""}`} href="/repos" onClick=${link("/repos")}>Find work</a>
+    <a class=${`navlink nv-sub ${r.startsWith("/research") ? "on" : ""}`} href="/research" onClick=${link("/research")}>Research</a>
     ${flight.length ? html`<div class="grp">In flight</div>${flight.map(({ t, st }) => html`<${Task} key=${t.short} t=${t} st=${st} />`)}` : null}
     <a class=${`navlink nv-sub ${r.startsWith("/finished") ? "on" : ""}`} href="/finished" onClick=${link("/finished")}>Submitted</a>
     ${submitted.length || accepted.length ? html`
@@ -122,6 +123,7 @@ export function TopNav() {
     <a class="brand" href="/" onClick=${link("/")}>Johto</a>
     <a class=${`navlink ${r === "/" ? "on" : ""}`} href="/" onClick=${link("/")}>Now${waiting ? html`<span class="count">${waiting}</span>` : null}</a>
     <a class=${`navlink ${r.startsWith("/repos") ? "on" : ""}`} href="/repos" onClick=${link("/repos")}>Find work</a>
+    <a class=${`navlink ${r.startsWith("/research") ? "on" : ""}`} href="/research" onClick=${link("/research")}>Research</a>
     <a class=${`navlink ${r.startsWith("/finished") ? "on" : ""}`} href="/finished" onClick=${link("/finished")}>Submitted</a>
     <div class="nv-chips">${flight.slice(0, CHIPS).map(({ t, st }) => html`<a class=${`tchip ${r === `/task/${t.short}` ? "on" : ""}`} href=${`/task/${t.short}`} onClick=${link(`/task/${t.short}`)} title=${`${names(t).name} · ${names(t).problem}: ${st.word}`}>
       <${Dot} tone=${st.tone} /><span class="tchip-t">${chip(t)}</span></a>`)}

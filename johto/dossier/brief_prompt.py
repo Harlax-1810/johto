@@ -25,7 +25,8 @@ what rival products (better funded, more mature or closed source) have that this
 
 ## The one-shot paradox
 
-He is testing a model. If a problem is obvious, the model solves it in one go and the task is worth nothing. So:
+He is testing a model: Claude Opus at high effort, which on an async task works alone on one prompt for about
+45 minutes. If a problem is obvious, the model solves it in one go and the task is worth nothing. So:
 
 - Seeds are few and honest. Each names the problem a user or operator sees and the tension that makes it hard.
   Never the fix, never the steps, never where the answer is.

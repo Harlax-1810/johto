@@ -135,6 +135,7 @@ export default function Brief({ id }) {
   const [full, setFull] = useState(false);
   const [folded, setFolded] = useState(true);
   const claimRef = useRef(null);
+  const draftRef = useRef(null);
   const sel = readSel();
   const b = d?.brief || null;
   const seeds = b?.seeds || [];
@@ -154,6 +155,7 @@ export default function Brief({ id }) {
   useEffect(() => pushContext("brief", {
     j: () => step(1), k: () => step(-1),
     c: () => { if (readSel()) claimRef.current?.(); },
+    d: () => { if (readSel()) draftRef.current?.(); },
     Escape: () => (readSel() ? close() : navigate("/repos")),
   }), [id]);
   function step(k) {
@@ -177,10 +179,10 @@ export default function Brief({ id }) {
   const findSeed = (oid) => seeds.find((s) => s.opportunity_id === oid) || (d.also_researched || []).find((s) => s.opportunity_id === oid);
   let inspector = null;
   if (sel?.kind === "seed" && findSeed(sel.id)) {
-    inspector = html`<${SeedInspector} key=${`s${sel.id}`} d=${d} seed=${findSeed(sel.id)} onClose=${close} claimRef=${claimRef} />`;
+    inspector = html`<${SeedInspector} key=${`s${sel.id}`} d=${d} seed=${findSeed(sel.id)} onClose=${close} claimRef=${claimRef} draftRef=${draftRef} />`;
   } else if (sel?.kind === "place") {
     const p = (b?.places || []).find((x) => x.id === sel.id);
-    if (p) inspector = html`<${PlaceInspector} key=${`p${sel.id}`} d=${d} place=${p} onClose=${close} claimRef=${claimRef}
+    if (p) inspector = html`<${PlaceInspector} key=${`p${sel.id}`} d=${d} place=${p} onClose=${close} claimRef=${claimRef} draftRef=${draftRef}
       onSeed=${(oid) => pick({ kind: "seed", id: oid })} />`;
   }
   const isSel = (kind, cid) => sel?.kind === kind && sel.id === cid;

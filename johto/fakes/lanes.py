@@ -7,6 +7,7 @@ Claude); teardown() records the call and removes nothing.
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import time
@@ -34,11 +35,16 @@ def new_lane(task_dir: Path, kind: str, stop_others: bool = False) -> Path:
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {KINDS}")
     meta = workspace.load(task_dir)
+    lane_task = workspace.lane_task(meta, task_dir)
+    # Mercor's prework.py takes 'Task <8 letters or digits>' or a Studio id; the fixtures' names are shorter, so this
+    # checks the shape (no other words, no hyphens), which is what a draft's 'Draft d-xxxxxx' used to fail.
+    if not re.fullmatch(r"(?:Task )?[a-z0-9]{1,8}|task_[0-9a-f]{32}", lane_task, re.I):
+        raise RuntimeError("[ERROR] The task must look like 'Task l50u5a0c', 'l50u5a0c' or 'task_<32 hex characters>'.")
     run_dir = next_run_dir(task_dir, kind)
     (run_dir / "prework_output").mkdir(parents=True)
     container = f"prework-FAKE_{task_dir.name}-{uuid.uuid4().hex[:12]}-model_a"
     (run_dir / "prework-manifest.json").write_text(json.dumps({"lane": {"container": container}}))
-    print(f"Setting up {run_dir.name} for {meta['task_name']} (fake lane, no Docker)...")
+    print(f"Setting up {run_dir.name} for {lane_task} (fake lane, no Docker)...")
     meta.setdefault("runs", []).append({"kind": kind, "dir": str(run_dir.relative_to(task_dir)),
                                         "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                                         "container": container})

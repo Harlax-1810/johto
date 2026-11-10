@@ -399,8 +399,9 @@ FOCUS_STYLE = {
     "Error / artifact brief": "a pasted error or file with a short note",
 }
 FOCUS_MODE = {
-    "Async/autonomous": "Claude works alone until it is done, with no replies from the engineer",
-    "Interactive/pairing": "the engineer answers Claude while it works",
+    "Async/autonomous": "Claude Opus at high effort works alone on one prompt for about 45 minutes, with no replies "
+                        "from the engineer",
+    "Interactive/pairing": "the engineer answers Claude (Opus, high effort) while it works",
 }
 
 
@@ -636,12 +637,13 @@ def extract(text: str) -> tuple[dict | None, str | None]:
     return doc, None
 
 
-def finalize(doc: dict, entry: dict, did: str, model: str | None, elapsed_s: int, cost_usd: float) -> dict:
+def finalize(doc: dict, entry: dict, did: str, model: str | None, elapsed_s: int, cost_usd: float,
+             effort: str = EFFORT) -> dict:
     """Stamp the fields the generator knows better than the model, in the spec's key order."""
     head = {
         "schema": schema.SCHEMA, "id": did, "repo": entry["full_name"], "commit": entry["commit"],
         "pinned_url": entry.get("pinned_url") or f"https://github.com/{entry['full_name']}/tree/{entry['commit']}",
-        "generated_at": store.now_iso(), "model": model or "claude-opus-5-5", "effort": EFFORT,
+        "generated_at": store.now_iso(), "model": model or "claude-opus-5-5", "effort": effort,
         "elapsed_s": elapsed_s, "cost_usd": round(cost_usd, 4),
     }
     rest = {k: v for k, v in doc.items() if k not in head}

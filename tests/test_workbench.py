@@ -310,6 +310,39 @@ class Reviews(WbRoot):
         st, _ = call("POST", "/api/tasks/drate001/reviews", {"text": "x"})
         self.assertEqual(st, 403)
 
+    def test_re_entering_a_review_replaces_the_saved_one(self):
+        """"Re-enter the review": the run's newest saved review goes aside, the pasted one takes its place at the
+        same turn, and the toast says so in words."""
+        from johto import reviews
+        d = config.TASKS / "drate001"
+        with mock.patch.object(wb, "_plain_mod", return_value=None):
+            self.assertEqual(self.post("drate001", {"text": "## Digest\nNothing to replace.\n", "replace": True})[0], 404)
+            st, first = self.post("drate001", {"text": "## Digest\nFirst reading.\n", "source": "gptpro", "turn": 3})
+            self.assertEqual(st, 200, first)
+            st, out = self.post("drate001", {"text": "## Digest\nSecond reading.\n", "source": "gptpro", "replace": True})
+        self.assertEqual(st, 200, out)
+        self.assertEqual(out["toast"]["text"], "Replaced the review of validation 1, turn 3.")
+        self.assertEqual(out["replaced"]["name"], first["review"]["name"])
+        saved = reviews.list_reviews(d)
+        self.assertEqual([(r["run"], r["turn"]) for r in saved], [("validate-1", 3)])
+        self.assertIn("Second reading", reviews.body(Path(saved[0]["path"])))
+        self.assertEqual(len(list((d / "reviews" / reviews.REMOVED).glob("*.md"))), 1)
+        self.assertNotRegex(json.dumps(out["toast"]), RUN_ID)
+        self.assertEqual(self.post("drate001", {"text": "x", "replace": "no-such-review.md"})[0], 404)
+        self.assertEqual(self.post("drate001", {"text": "x", "replace": 3})[0], 400)
+
+    def test_the_api_json_of_a_reply_is_saved_as_its_markdown(self):
+        from johto import reviews
+        wrapped = json.dumps({"type": "message", "role": "assistant", "status": "completed",
+                              "content": [{"type": "output_text", "text": "## Digest\n\nFrom the API.\n"}]})
+        with mock.patch.object(wb, "_plain_mod", return_value=None):
+            st, out = self.post("drate001", {"text": wrapped, "source": "gptpro"})
+        self.assertEqual(st, 200, out)
+        saved = reviews.list_reviews(config.TASKS / "drate001")
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(reviews.body(Path(saved[0]["path"])).strip(), "## Digest\n\nFrom the API.")
+        self.assertEqual(saved[0]["first_line"], "Digest")
+
 
 class ReviewLatest(WbRoot):
     def test_it_packs_and_copies_and_never_sends(self):

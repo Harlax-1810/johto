@@ -1,4 +1,4 @@
-"""`johto dossier run|once|list|pause|resume|brief|brief-show`."""
+"""`johto dossier run|once|list|pause|resume|model|brief|brief-show`."""
 from __future__ import annotations
 
 import sys
@@ -35,20 +35,22 @@ def cmd_once(a) -> None:
     if a.focus:
         entry = {**entry, "focus": list(a.focus)}
     did = store.make_id(entry["full_name"], entry["commit"])
+    model = a.model or worker.model_choice()
     with store.generation_lock(wait_s=1.0) as got:
         if got:
-            return _once(entry, did)
+            return _once(entry, did, model)
     _say("Another generation is running; waiting for it to finish.")
     with store.generation_lock(blocking=True):
-        _once(entry, did)
+        _once(entry, did, model)
 
 
-def _once(entry: dict, did: str) -> None:
+def _once(entry: dict, did: str, model: str | None = None) -> None:
     """Queue and run one item. The caller holds the generation lock, so no worker can start this item (or
     any other) between queueing it here and running it."""
     worker.queue_manual(entry)
-    _say(f"generating {did} ({entry['full_name']} at {entry['commit'][:8]})")
-    res = worker.run_item(did, echo=_say)
+    model = model or worker.model_choice()
+    _say(f"generating {did} ({entry['full_name']} at {entry['commit'][:8]}) with {worker.MODELS[model]}")
+    res = worker.run_item(did, echo=_say, model=model)
     if res.ok:
         _say(f"ready: {store.dossier_path(did)}  ({res.elapsed_s}s, ${res.cost_usd:.2f}, {res.passes} pass"
              f"{'es' if res.passes != 1 else ''})")
@@ -90,6 +92,16 @@ def cmd_pause(a) -> None:
 def cmd_resume(a) -> None:
     worker.set_paused(False)
     _say("resumed; a running worker picks this up within a minute")
+
+
+def cmd_model(a) -> None:
+    """Show or set who writes dossiers from here on (a running generation keeps its model)."""
+    if a.model:
+        worker.set_model(a.model)
+        _say(f"dossiers are written by {worker.MODELS[a.model]} from the next generation on")
+    else:
+        m = worker.model_choice()
+        _say(f"{m}: dossiers are written by {worker.MODELS[m]}  (choices: {', '.join(worker.MODELS)})")
 
 
 # --- repo briefs --------------------------------------------------------------------------------------
@@ -189,6 +201,7 @@ def register(sub) -> None:
     s.add_argument("--focus", action="append", metavar="SLOT",
                    help='a slot group to find problems for, "Action|Domain|Codebase type" (with optional '
                         '"|Prompt style|Interaction mode"); repeat for more')
+    s.add_argument("--model", choices=sorted(worker.MODELS), help="who writes it (default: the dossier_model setting)")
     s.set_defaults(func=cmd_once)
     s = ds.add_parser("list", help="the queue and its states")
     s.set_defaults(func=cmd_list)
@@ -197,6 +210,9 @@ def register(sub) -> None:
     s.set_defaults(func=cmd_pause)
     s = ds.add_parser("resume", help="let the worker start generations again")
     s.set_defaults(func=cmd_resume)
+    s = ds.add_parser("model", help="show or set who writes dossiers: claude (Claude Code) or codex (the Codex CLI)")
+    s.add_argument("model", nargs="?", choices=sorted(worker.MODELS))
+    s.set_defaults(func=cmd_model)
     s = ds.add_parser("brief", help="write the plain-words repo brief for a dossier now (id, owner/name or all)")
     s.add_argument("target", help="a dossier id, owner/name, or all")
     s.add_argument("--force", action="store_true", help="write it again even when it is ready")

@@ -120,6 +120,11 @@ session); a second failure marks the item `failed` with the errors."""
 # decision point, shape prescribing the fix, ambition as a goal statement, check_in_session as acceptance
 # tests. One-shot ratings were overconfident and most opportunities were single bugs.
 PROMPT_REVISIONS = [
+    ("Skip anything a careful model would finish in one pass in under\n15 minutes; skip work that needs paid services",
+     "Skip anything a careful model would finish in one pass in under\n15 minutes. The agent under test is Claude "
+     "Opus at high effort. An async task is one prompt it works on alone for about 45 minutes with no replies; an "
+     "interactive task is a session where the engineer answers as it works. A bounded task takes most of those "
+     "45 minutes of a strong agent's work and is plausibly finished inside them. Skip work that needs paid services"),
     ("skip problems already fixed on the default branch or in an open PR.",
      "skip problems already fixed on the default branch or in an open PR. Rate one_shot against an agent that "
      "is told the symptom and the area. Rate unlikely only with a named reason the fix fails even when the "

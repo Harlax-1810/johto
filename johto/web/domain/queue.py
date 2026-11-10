@@ -53,13 +53,13 @@ TURN_ROWS = {
     "problem": ("lane_problem", "Claude hit a problem", 1, 1, 2),
     "substantive": ("lane_answer", "Read Claude's answer", 5, 3, 0),
 }
-FINISH = {"decide", "rate", "log_discard", "feedback", "fix_qc", "submit", "save", "rejected", "lane_async_done",
-          "finish_details"}
+FINISH = {"decide", "rate", "log_discard", "feedback", "fix_qc", "submit", "save", "claim_slot", "rejected",
+          "lane_async_done", "finish_details"}
 START = {"lane_start", "pick", "new_prompt"}
-STUDIO_KINDS = {"save", "fix_qc", "submit", "feedback", "pick"}   # their primary action needs the Studio tab
+STUDIO_KINDS = {"save", "claim_slot", "fix_qc", "submit", "feedback", "pick"}   # their primary action needs the Studio tab
 # Within "finish what is close": the step nearest to submitted first (by what is left, not by when it arrived).
-CLOSE = {"submit": 0, "save": 1, "fix_qc": 2, "log_discard": 3, "decide": 4, "lane_async_done": 5, "rate": 6,
-         "feedback": 7, "write_details": 8, "rejected": 9}
+CLOSE = {"submit": 0, "save": 1, "claim_slot": 1, "fix_qc": 2, "log_discard": 3, "decide": 4, "lane_async_done": 5,
+         "rate": 6, "feedback": 7, "write_details": 8, "rejected": 9}
 
 
 def run_word(run: str | None) -> str:
@@ -214,6 +214,14 @@ def _task_row(t: dict, now: float) -> dict | None:
                      reason=f"AutoQC passed {at_phrase(at)}" if at else "AutoQC passed",
                      primary={"label": "Submit (press twice)", "action": "submit", "args": {}},
                      facts=(stage, qc.get("audit_id")))
+    if stage == "ready_to_save" and t.get("draft"):
+        # A draft: everything is written and rated; the one step left is a slot in Studio.
+        n = int((t.get("draft") or {}).get("open") or 0)
+        reason = (f"{n} open slot{'s' if n != 1 else ''} match{'es' if n == 1 else ''}; claiming saves every field and the gists"
+                  if n else "No open slot matches yet; johto looks again every few minutes")
+        return _item("claim_slot", 4, "studio", "Claim a slot and fill Studio", **common, est=est_s("save"),
+                     reason=reason, primary={"label": "Claim a slot and fill Studio", "action": "claim_slot", "args": {}},
+                     facts=(stage, "draft", n))
     if stage == "ready_to_save":
         changed = t.get("changed_since_push")
         if changed:

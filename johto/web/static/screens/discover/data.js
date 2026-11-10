@@ -171,6 +171,15 @@ export async function setPaused(paused) {
   loadListing();
 }
 
+export const RESEARCH_MODELS = [["claude", "Claude Code"], ["codex", "Codex CLI"]];
+
+/** Who writes the next dossiers: "claude" or "codex". A repo being researched keeps its model. */
+export async function setModel(model) {
+  const r = await send("PUT", "/api/dossiers/worker", { model });
+  if (r) toast(`${r.model_word || model} writes the next dossiers.`);
+  loadListing();
+}
+
 export async function syncSlots() {
   const r = await send("POST", "/api/slots/sync", {});
   if (r) toast("Reading the open slots from Studio.");

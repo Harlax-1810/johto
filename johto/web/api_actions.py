@@ -278,7 +278,10 @@ async def claim(req: Request):
     slot = {"action": fit.get("action"), "domain": fit.get("domain"), "codebase_type": fit.get("codebase_type"),
             "prompt_style": b.get("prompt_style"), "interaction_mode": b.get("interaction_mode")}
     task_id = b.get("task_id")
-    if not task_id:
+    as_draft = bool(b.get("draft"))
+    if as_draft and None in slot.values():
+        raise ActionError("invalid", "A draft needs the slot's prompt style and mode too: pick a variant.")
+    if not task_id and not as_draft:
         if None in slot.values():
             raise ActionError("invalid", "Pick a slot variant (prompt style and mode) to claim.")
         open_ = actions.slot_tasks(slot)
@@ -300,6 +303,8 @@ async def claim(req: Request):
     elif not lead and opp:
         label = f"{repo_args[0].split('/')[-1]} · {opp.get('title')}"
     want_check = b.get("codebase_check", True) is not False
+    if as_draft:
+        return _accepted(_draft_job(b, slot, repo_args, lead, doc, opp, label, stored_origin))
 
     def fn(ctx: jobs.JobCtx):
         ctx.step("repo", ["repo", *actions.CLAIM_STEPS])
@@ -321,14 +326,7 @@ async def claim(req: Request):
             ctx.log(f"The task understanding didn't start: {e}")
         # A claim from a seed or a place marks the repo's research as started (a place with no problem id). The
         # undo puts it back when this claim was what started it.
-        marked = False
-        if stored_origin is not None and doc is not None:
-            try:
-                from ..dossier import worker
-                worker.act(doc["id"], stored_origin.get("opportunity_id"), short)
-                marked = True
-            except Exception:   # already started from another seed, or a fixture dossier: nothing to mark
-                marked = False
+        marked = _mark_research(doc, stored_origin, short)
 
         def undo_fn():
             if marked:
@@ -350,6 +348,150 @@ async def claim(req: Request):
     job = jobs.submit("claim", f"l:{b.get('lead_id') or b.get('dossier_id') or repo_args[0]}", fn, pool="studio",
                       priority=0, params={"task_id": task_id}, steps=["repo", *actions.CLAIM_STEPS])
     return _accepted(job)
+
+
+def _mark_research(doc: dict | None, origin: dict | None, short: str) -> bool:
+    """A claim or draft from a seed or a place marks the repo's research as started. False when nothing was marked
+    (already started from another seed, or a fixture dossier)."""
+    if origin is None or doc is None:
+        return False
+    try:
+        from ..dossier import worker
+        worker.act(doc["id"], origin.get("opportunity_id"), short)
+        return True
+    except Exception:
+        return False
+
+
+def _draft_job(b: dict, slot: dict, repo_args: tuple, lead: dict | None, doc: dict | None, opp: dict | None,
+               label: str | None, origin: dict | None) -> dict:
+    """POST /api/claim with draft: the task folder without a Studio slot. Nothing in Studio changes; the slot is
+    claimed later from the task's Submit step (claim_slot), which then saves everything at once."""
+    def fn(ctx: jobs.JobCtx):
+        ctx.step("repo", ["repo", "folder"])
+        repo = actions.repo_info(*repo_args)
+        warnings = actions.check_repo_allowed(repo)
+        for w in warnings:
+            ctx.log(w)
+        ctx.step("folder")
+        d = actions.draft(slot, repo, lead, dossier=doc, opportunity=opp, label=label, origin=origin)
+        short = d.name
+        try:   # the task understanding is researched while he writes, as after a claim
+            from .. import understand
+            understand.ensure(d)
+        except Exception as e:  # noqa: BLE001
+            ctx.log(f"The task understanding didn't start: {e}")
+        _mark_research(doc, origin, short)
+        n = actions.draft_open(workspace.load(d))
+        jobs.toast(f"Started {_label(d)} without a slot. " + (f"{n} open slot{'s' if n != 1 else ''} match now; "
+                   "claim one from its Submit step when the task is written." if n else
+                   "Claim a slot from its Submit step when one opens."), level="ok")
+        task_changed(short, ["sections", "studio"])
+        jobs.publish("leads", {"changed": True})
+        return {"short": short, "draft": True, "warnings": warnings, "open": n}
+
+    return jobs.submit("draft", f"l:{b.get('lead_id') or b.get('dossier_id') or repo_args[0]}", fn, pool="github",
+                       priority=1, steps=["repo", "folder"])
+
+
+FILL_STEPS = ["gh_account", "gists", "saving_fields", "starting_qc"]
+
+
+def _fill_studio(d: Path, ctx: jobs.JobCtx, run: str | None, t: dict) -> dict:
+    """Save to Studio's body, shared with claim_slot: the gists when a run is collected, every field (Studio's own
+    edits come in first), then AutoQC. `t` is the task as just re-read."""
+    short = d.name
+    vrun, rec = actions.validation_run(d, run)
+    gists = None
+    if rec and rec.get("transcript") and rec.get("diff"):
+        gists = actions.upload_gists(d, run, on_step=ctx.step)
+    else:
+        ctx.log("No collected run with a diff yet, so the gists wait.")
+    ctx.check_cancel()
+    ctx.step("saving_fields")
+    pushed = actions.push(d, run, checked=True, task=t)
+    task_changed(short, ["studio"] + (["sections", "ratings"] if pushed.get("pulled") else []))
+    if pushed.get("pulled"):
+        jobs.toast(f"Brought your Studio edits in first: {', '.join(pushed['pulled'])}", level="info")
+    ctx.check_cancel()
+    ctx.step("starting_qc")
+    aid = actions.start_qc(d, "AutoQC", checked=True)
+    child = _qc_wait_job(short, aid, "AutoQC", ctx.job_id) if aid else None
+    return {"saved": pushed["saved"], "fields": sorted(pushed["fields"]), "at": pushed["at"],
+            "gists": (gists or {}).get("gists"), "run": vrun, "audit_id": aid, "qc_job": (child or {}).get("id")}
+
+
+@guarded
+async def claim_slot(req: Request):
+    """POST /api/tasks/{short}/claim-slot (his press): claim an open Studio slot with the draft's seeds, then save
+    everything the folder holds: the gists, every field, the ratings, and run AutoQC. Body: {task_id?, run?}."""
+    short = req.path_params["short"]
+    d = _dir(short)
+    meta = await _thread(workspace.load, d)
+    if not workspace.is_draft(meta):
+        raise ActionError("invalid", f"{_label(d)} already has a Studio slot.")
+    live = _existing("claim_slot", short)
+    if live:
+        return _accepted(live, existing=True)
+    await _thread(_guard_overlap, d)    # a red overlap blocks the save, so it blocks the claim too
+    b = await _body(req)
+    run = b.get("run")
+    actions.check_run_name(run)
+    want_id = b.get("task_id") or None
+    steps = [*actions.BIND_STEPS, *FILL_STEPS]
+
+    def fn(ctx: jobs.JobCtx):
+        ctx.step("recheck", steps)
+        bound = actions.bind(d, want_id, on_step=ctx.step)
+        task_changed(short, ["studio"])
+        jobs.publish("leads", {"changed": True})
+        t = actions.S().task(bound["task_id"])
+        res = _fill_studio(d, ctx, run, t)
+        _codebase_check_later(short, ctx.job_id)
+        jobs.toast(f"Claimed {bound['task_name']} for {_label(d)} and saved everything to Studio. Mercor's automatic "
+                   "checks are running.", level="ok",
+                   link={"label": "Open in Studio", "href": studio.task_url(bound["task_id"])})
+        return {"short": short, **bound, **res}
+
+    return _accepted(jobs.submit("claim_slot", f"t:{short}", fn, pool="studio", priority=0, params={"task_id": want_id},
+                                 steps=steps))
+
+
+@guarded
+async def draft_delete(req: Request):
+    """POST /api/tasks/{short}/draft/delete (two presses): a draft's folder moves to tasks/.drafts. Nothing in
+    Studio changes, because nothing there was ever touched."""
+    short = req.path_params["short"]
+    d = _dir(short)
+    b = await _body(req)
+    meta = await _thread(workspace.load, d)
+    if not workspace.is_draft(meta):
+        raise ActionError("invalid", f"{_label(d)} has a Studio slot. Unclaim it in Studio instead.")
+    label = _label(d)
+    _confirmed("draft_delete", short, b, f"Press again to delete {label}. Its folder moves to tasks/.drafts.")
+
+    def fn(ctx: jobs.JobCtx):
+        ctx.step("lanes", ["lanes", "moving"])
+        cleaned = actions.clean(d)
+        if cleaned.get("skipped"):
+            raise ActionError("lane_state", f"A lane of {label} is still running: {cleaned['skipped'][0]['reason']}. "
+                              "End it first.")
+        ctx.step("moving")
+        res = actions.shelve_draft(d)
+        origin = meta.get("origin") or {}
+        if origin.get("dossier_id"):
+            try:
+                from ..dossier import worker
+                worker.restore(origin["dossier_id"])
+            except Exception:
+                pass
+        jobs.publish("task.removed", {"short": short})
+        jobs.publish("leads", {"changed": True})
+        jobs.toast(f"Deleted the draft {label}. Its folder is in tasks/.drafts.", level="ok")
+        return res
+
+    return _accepted(jobs.submit("draft_delete", f"t:{short}", fn, pool="local", priority=0, cancellable=False,
+                                 steps=["lanes", "moving"]))
 
 
 def _codebase_check_later(short: str, parent: str) -> dict:
@@ -672,31 +814,16 @@ async def studio_save(req: Request):
     run = (await _body(req)).get("run")
     actions.check_run_name(run)
 
-    def fn(ctx: jobs.JobCtx):
-        ctx.step("recheck", ["recheck", "gh_account", "gists", "saving_fields", "starting_qc"])
-        t = actions.recheck_mine(d)
-        vrun, rec = actions.validation_run(d, run)
-        gists = None
-        if rec and rec.get("transcript") and rec.get("diff"):
-            gists = actions.upload_gists(d, run, on_step=ctx.step)
-        else:
-            ctx.log("No collected run with a diff yet, so the gists wait.")
-        ctx.check_cancel()
-        ctx.step("saving_fields")
-        pushed = actions.push(d, run, checked=True, task=t)
-        task_changed(short, ["studio"] + (["sections", "ratings"] if pushed.get("pulled") else []))
-        if pushed.get("pulled"):
-            jobs.toast(f"Brought your Studio edits in first: {', '.join(pushed['pulled'])}", level="info")
-        ctx.check_cancel()
-        ctx.step("starting_qc")
-        aid = actions.start_qc(d, "AutoQC", checked=True)
-        child = _qc_wait_job(short, aid, "AutoQC", ctx.job_id) if aid else None
-        jobs.toast(f"Saved {_label(d)} to Studio. Mercor's automatic checks are running.", level="ok")
-        return {"saved": pushed["saved"], "fields": sorted(pushed["fields"]), "at": pushed["at"],
-                "gists": (gists or {}).get("gists"), "run": vrun, "audit_id": aid, "qc_job": (child or {}).get("id")}
+    await _thread(lambda: actions.need_slot(workspace.load(d), d))
 
-    return _accepted(jobs.submit("save", f"t:{short}", fn, pool="studio", priority=0,
-                                 steps=["recheck", "gh_account", "gists", "saving_fields", "starting_qc"]))
+    def fn(ctx: jobs.JobCtx):
+        ctx.step("recheck", ["recheck", *FILL_STEPS])
+        t = actions.recheck_mine(d)
+        res = _fill_studio(d, ctx, run, t)
+        jobs.toast(f"Saved {_label(d)} to Studio. Mercor's automatic checks are running.", level="ok")
+        return res
+
+    return _accepted(jobs.submit("save", f"t:{short}", fn, pool="studio", priority=0, steps=["recheck", *FILL_STEPS]))
 
 
 @guarded
@@ -729,6 +856,7 @@ async def studio_submit(req: Request):
     b = await _body(req)
     if _existing("submit", short):
         return _accepted(_existing("submit", short), existing=True)
+    await _thread(lambda: actions.need_slot(workspace.load(d), d))
     rows = await _thread(actions.checklist, d)
     blockers = actions.submit_blockers(rows)
     if blockers:
@@ -780,7 +908,10 @@ async def studio_unclaim(req: Request):
 @guarded
 async def studio_refresh(req: Request):
     short = req.path_params["short"]
-    _dir(short)
+    d = _dir(short)
+    if workspace.is_draft(await _thread(workspace.load, d)):
+        # Nothing of a draft is in Studio; what Studio can offer it is a slot, so the slots are read instead.
+        return _accepted(watch_draft_slots(force=True) or {"id": None, "kind": "slots_sync", "state": "succeeded"})
     live = _existing("studio_refresh", short)
     if live:
         return _accepted(live, existing=True)
@@ -860,7 +991,7 @@ def _shorts_by_status() -> tuple[list[str], list[str]]:
             meta = json.loads(tj.read_text())
         except (OSError, ValueError):
             continue
-        if meta.get("unclaimed_at") or meta.get("discarded"):
+        if meta.get("unclaimed_at") or meta.get("discarded") or not meta.get("task_id"):
             continue
         st = (meta.get("studio") or {}).get("status", "Writing")
         if st == "Writing":
@@ -895,10 +1026,57 @@ def sync_all(min_gap: float = SYNC_MIN_GAP_S, review_gap: float = REVIEW_FOCUS_G
     return started
 
 
+DRAFT_SLOTS_EVERY_S = 600
+_DRAFT_SLOTS_AT = {"at": 0.0}
+
+
+def _draft_slot_news(before: dict[str, int]) -> list[str]:
+    """After a slots sync: a toast for each draft whose seeds just got an open slot. Returns their shorts."""
+    opened = []
+    for d, m in actions.drafts():
+        n = actions.draft_open(m)
+        if n and not before.get(d.name):
+            opened.append(d.name)
+            jobs.toast(f"A slot opened for {_label(d)}. Claim it from the task's Submit step.", level="ok",
+                       link={"label": "Open the task", "href": f"/task/{d.name}#step=submit"})
+        if n != before.get(d.name, 0):
+            task_changed(d.name, ["studio"])
+    return opened
+
+
+def watch_draft_slots(force: bool = False) -> dict | None:
+    """While drafts wait for a slot, read Studio's open slots every ten minutes (or now, with force) and say when
+    one matches. None when there is no draft, a sync is running, or it is too soon."""
+    ds = actions.drafts()
+    if not ds:
+        return None
+    now = time.time()
+    if not force and now - _DRAFT_SLOTS_AT["at"] < DRAFT_SLOTS_EVERY_S:
+        return None
+    live = jobs.active(kind="slots_sync")
+    if live:
+        return live[0]
+    _DRAFT_SLOTS_AT["at"] = now
+    before = {d.name: actions.draft_open(m) for d, m in ds}
+
+    def fn(ctx: jobs.JobCtx):
+        from .. import slots
+        ctx.step("get", ["get"])
+        out = slots.sync(api=actions.S())
+        jobs.publish("leads", {"changed": True})
+        return {"synced_at": out["synced_at"], "groups": len(out["groups"]),
+                "open": sum(g["count"] for g in out["groups"]), "drafts": len(ds), "opened": _draft_slot_news(before)}
+
+    return jobs.submit("slots_sync", "Studio", fn, pool="studio", priority=2, steps=["get"])
+
+
 @guarded
 async def studio_sync(req: Request):
     """POST /api/studio/sync: the page sends this when it regains focus (back from editing in Studio)."""
     started = await _thread(sync_all)
+    w = await _thread(watch_draft_slots)
+    if w:
+        started.append(w)
     return JSONResponse({"jobs": started}, status_code=202)
 
 
@@ -955,13 +1133,15 @@ async def slots_sync(req: Request):
     if live:
         return _accepted(live[0], existing=True)
 
+    before = {d.name: actions.draft_open(m) for d, m in actions.drafts()}
+
     def fn(ctx: jobs.JobCtx):
         from .. import slots
         ctx.step("get", ["get"])
         out = slots.sync(api=actions.S())
         jobs.publish("leads", {"changed": True})
         return {"synced_at": out["synced_at"], "groups": len(out["groups"]),
-                "open": sum(g["count"] for g in out["groups"])}
+                "open": sum(g["count"] for g in out["groups"]), "opened": _draft_slot_news(before)}
 
     return _accepted(jobs.submit("slots_sync", "Studio", fn, pool="studio", priority=1, steps=["get"]))
 
@@ -1161,6 +1341,8 @@ routes = [
     Route("/api/tasks/{short}/checklist", checklist),
     Route("/api/tasks/{short}/lint", check),   # the old local lint; /check is the draft check (api_task)
     Route("/api/tasks/{short}/studio/save", studio_save, methods=["POST"]),
+    Route("/api/tasks/{short}/claim-slot", claim_slot, methods=["POST"]),
+    Route("/api/tasks/{short}/draft/delete", draft_delete, methods=["POST"]),
     Route("/api/tasks/{short}/studio/qc", studio_qc, methods=["POST"]),
     Route("/api/tasks/{short}/studio/submit", studio_submit, methods=["POST"]),
     Route("/api/tasks/{short}/studio/unclaim", studio_unclaim, methods=["POST"]),
@@ -1196,6 +1378,7 @@ def _poll_loop(stop) -> None:
     while not stop.wait(SYNC_EVERY_S):
         try:
             sync_all(min_gap=SYNC_EVERY_S / 2, review_gap=REVIEW_EVERY_S)
+            watch_draft_slots()
         except Exception as e:  # the next round tries again
             print(f"studio sync: {e}", flush=True)
 

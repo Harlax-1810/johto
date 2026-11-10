@@ -27,6 +27,7 @@ import json, time
 REQ = json.loads(%(req)r)
 ACCOUNT = %(account)r
 START = %(start)r
+TIMEOUT = %(timeout)r
 tabs = [t for t in list_tabs(include_chrome=False)
         if (t.get("url") or "").startswith("https://studio.mercor.com")
         and t.get("account") in (None, ACCOUNT)]
@@ -43,7 +44,10 @@ for t in sorted(tabs, key=lambda t: "/sign-in" in (t.get("url") or "")):
 if T is None and tabs:
     T = next((t["targetId"] for t in tabs if "/sign-in" not in (t.get("url") or "")), tabs[0]["targetId"])
 if T is None:
-    T = new_tab(START, account=ACCOUNT)
+    # The multi-account fork's new_tab takes the Chrome profile account; the released browser-harness
+    # (0.1.x) takes only the URL and opens the tab in the attached profile. Either way, open Studio.
+    import inspect as _i
+    T = new_tab(START, account=ACCOUNT) if "account" in _i.signature(new_tab).parameters else new_tab(START)
     if isinstance(T, dict):
         T = T.get("targetId") or T.get("target_id")
 ready = False
@@ -55,17 +59,39 @@ for _ in range(60):
 if not ready:
     print(%(mark)r + json.dumps({"status": 0, "body": "Studio tab has no Clerk session (logged out?)"}))
 else:
-    expr = """(async () => {
-      const req = %%s;
-      const token = await window.Clerk.session.getToken();
-      const headers = {Authorization: 'Bearer ' + token, 'x-campaign-id': req.campaign,
-                       'x-company-id': req.company, 'x-account-id': req.account};
-      const init = {method: req.method, headers};
-      if (req.body !== null) { headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(req.body); }
-      const r = await fetch(req.url, init);
-      return JSON.stringify({status: r.status, body: await r.text(), version: r.headers.get('X-Task-Version')});
-    })()""" %% json.dumps(REQ)
-    print(%(mark)r + js(expr, target_id=T))
+    # The released browser-harness waits at most 5 s for one js() call, and a Studio request (Clerk token, then the
+    # API) can take longer. So the fetch starts in the tab and parks its result on window.__johto, and short js()
+    # calls poll for it until TIMEOUT.
+    KEY = "r%%d" %% int(time.time() * 1000)
+    start = """(() => {
+      const req = %%s; const key = %%s;
+      window.__johto = window.__johto || {}; window.__johto[key] = null;
+      (async () => {
+        try {
+          const token = await window.Clerk.session.getToken();
+          const headers = {Authorization: 'Bearer ' + token, 'x-campaign-id': req.campaign,
+                           'x-company-id': req.company, 'x-account-id': req.account};
+          const init = {method: req.method, headers};
+          if (req.body !== null) { headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(req.body); }
+          const r = await fetch(req.url, init);
+          window.__johto[key] = JSON.stringify({status: r.status, body: await r.text(), version: r.headers.get('X-Task-Version')});
+        } catch (e) {
+          window.__johto[key] = JSON.stringify({status: 0, body: 'Studio request failed in the tab: ' + ((e && e.message) || e)});
+        }
+      })();
+      return true;
+    })()""" %% (json.dumps(REQ), json.dumps(KEY))
+    js(start, target_id=T)
+    poll = "(() => { const v = (window.__johto || {})[%%s]; if (v !== null && v !== undefined) delete window.__johto[%%s]; return v === undefined ? null : v; })()" %% (json.dumps(KEY), json.dumps(KEY))
+    deadline = time.time() + TIMEOUT
+    res = None
+    while res is None and time.time() < deadline:
+        res = js(poll, target_id=T)
+        if res is None:
+            time.sleep(0.25)
+    if res is None:
+        res = json.dumps({"status": 0, "body": "Studio did not answer within %%d seconds" %% TIMEOUT})
+    print(%(mark)r + res)
 '''
 
 
@@ -94,7 +120,7 @@ def request(method: str, path: str, body=None, query: dict | None = None, timeou
            "company": config.COMPANY_ID, "account": config.ACCOUNT_ID}
     start = f"{config.STUDIO}/annotator/views/{config.VIEWS['mine']}/?world_id={config.WORLD_ID}&campaignId={config.CAMPAIGN_ID}"
     script = _SCRIPT % {"req": json.dumps(req), "account": config.BROWSER_ACCOUNT,
-                        "start": start, "mark": MARK}
+                        "start": start, "mark": MARK, "timeout": max(15, int(timeout) - 45)}
     try:
         stdout = _run_harness(script, timeout)
     except RuntimeError as e:

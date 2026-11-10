@@ -1,0 +1,19 @@
+ ▐▛███▛█   Claude Code v2.1.311
+▝▜██████▀  Opus 5.5 with high effort · API Usage Billing
+ ▝▝   ▝▝   /work
+
+❯ /login                                                                                          
+  ⎿  Login interrupted
+❯ /login                                                                                          
+──────────────────────────────────────────────────────────────────────────────────────────────────
+  Login
+  Browser didn't open? Use the url below to sign in (c to copy)
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&re
+sponse_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=or
+g%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_server
+s+user%3Afile_upload+user%3Aplugins&code_challenge=Q2hhbGxlbmdlX2Zvcl90aGVfY2xhdWRlX2NvbV90ZXN&cod
+e_challenge_method=S256&state=U3RhdGVfZm9yX3RoZV9jbGF1ZGVfY29tX3Rlc3RfcGF
+  Paste code here if prompted >
+  Esc to cancel
+
+

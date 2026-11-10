@@ -243,9 +243,11 @@ export async function reviewLatest(short) {
   } catch (e) { fail(e); return null; }
 }
 
-export async function saveReview(short, text, turn) {
+/** Save GPT Pro's reply. With replace, the run's newest saved review goes first and this one takes its place. */
+export async function saveReview(short, text, turn, { replace = false } = {}) {
   try {
-    const r = await api.post(`/api/tasks/${short}/reviews`, { text, source: "gptpro", ...(turn ? { turn } : {}) });
+    const r = await api.post(`/api/tasks/${short}/reviews`, { text, source: "gptpro", ...(turn ? { turn } : {}),
+      ...(replace ? { replace: true } : {}) });
     report(r);
     return r;
   } catch (e) { fail(e); return null; }
@@ -255,7 +257,9 @@ export async function saveReview(short, text, turn) {
 export function dropTask(short, task, why) {
   const run = task?.submission_run || (task?.runs || []).filter((r) => r.kind === "validate").slice(-1)[0]?.name;
   const name = task?.summary?.label || "the task";
-  return startDrop({ short, run, label: `${why ? `${why}; ` : ""}unclaims ${name} in Studio and removes its lanes` });
+  const what = task?.studio?.draft ? `removes the lanes of ${name} (it has no Studio slot to unclaim)`
+    : `unclaims ${name} in Studio and removes its lanes`;
+  return startDrop({ short, run, label: `${why ? `${why}; ` : ""}${what}` });
 }
 
 // ---------- Studio ----------
@@ -275,6 +279,49 @@ export async function saveToStudio(short, task, { onRed } = {}) {
     report(r, "Saving to Studio");
     return r;
   } catch (e) { reportError({ ...e, message: plainMessage(e.message) }, "Save to Studio"); return null; }
+}
+
+/** Red overlaps (his words repeating AI text) in any protected field, as {key, ...overlap}[]. */
+const redOverlapList = (task) => Object.entries(task?.sections || {}).flatMap(([k, s]) => (s?.overlap || [])
+  .filter((o) => o.level === "red" && !o.accepted).map((o) => ({ ...o, key: k })));
+
+/**
+ * Claim a slot and fill Studio (his press, on a draft): takes one open slot with the task's seeds, then saves the
+ * gists, every field and the ratings, and runs Mercor's checks. Resolves to the finished job, or null.
+ */
+export async function claimSlot(short, task, { onRed } = {}) {
+  const red = redOverlapList(task);
+  if (red.length) {
+    toast("A field repeats AI text word for word. Reword it or mark it as your own, then claim.", { level: "error" });
+    onRed?.(red[0]);
+    return null;
+  }
+  await flushFields();
+  try {
+    const r = await api.post(`/api/tasks/${short}/claim-slot`, {});
+    report(r, "Claiming a slot in Studio");
+    if (!r?.job) return r;
+    const j = await waitJob(r.job);
+    if (j?.state === "failed") {
+      const e = j.error || {};
+      if (e.code === "taken") toast("Someone just took that slot. Press again when another opens.", { level: "error" });
+      else if (e.code === "no_open_slot") toast("No open slot matches right now. Johto says when one opens.", { level: "error" });
+      else toast(plainMessage(e.message || "The claim didn't go through"), { level: "error" });
+    }
+    await loadTask(short, true).catch(() => {});
+    return j;
+  } catch (e) { reportError({ ...e, message: plainMessage(e.message) }, "Claim a slot"); return null; }
+}
+
+/** Delete a draft (two presses): its folder moves aside; nothing in Studio was ever touched. */
+export async function deleteDraft(short, { onArm, onDisarm } = {}) {
+  const path = `/api/tasks/${short}/draft/delete`;
+  try {
+    const r = await api.confirmable("POST", path, {}, { onArm, onDisarm });
+    if (r?.armed) return "armed";
+    report(r, "Deleting the draft");
+    return r;
+  } catch (e) { fail(e); return null; }
 }
 
 export async function rerunQc(short) {

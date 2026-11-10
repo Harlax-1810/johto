@@ -8,8 +8,15 @@ import time
 
 from . import config, studio
 
-SLOTS_FILE = config.DATA / "slots.json"
-TASKS_FILE = config.DATA / "studio_tasks.json"
+
+
+def slots_file():
+    """data/slots.json, read from config at call time so a patched config.DATA (tests) is honoured."""
+    return config.DATA / "slots.json"
+
+
+def tasks_file():
+    return config.DATA / "studio_tasks.json"
 
 
 def slot_key(slot: dict) -> str:
@@ -41,7 +48,7 @@ def sync(api=None) -> dict:
     api = api or studio
     tasks = [_compact(t, api) for t in api.list_tasks()]
     config.DATA.mkdir(parents=True, exist_ok=True)
-    TASKS_FILE.write_text(json.dumps(tasks, indent=1))
+    tasks_file().write_text(json.dumps(tasks, indent=1))
     groups: dict[str, dict] = {}
     for t in tasks:
         if t["status"] != "Ready to Claim":
@@ -51,21 +58,21 @@ def sync(api=None) -> dict:
         g["tasks"].append({"task_id": t["task_id"], "task_name": t["task_name"]})
     out = {"synced_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
            "groups": sorted(groups.values(), key=lambda g: -g["count"])}
-    SLOTS_FILE.write_text(json.dumps(out, indent=1))
+    slots_file().write_text(json.dumps(out, indent=1))
     return out
 
 
 def load(max_age_s: float | None = None) -> dict:
-    if not SLOTS_FILE.exists() or (
-            max_age_s is not None and time.time() - SLOTS_FILE.stat().st_mtime > max_age_s):
+    f = slots_file()
+    if not f.exists() or (max_age_s is not None and time.time() - f.stat().st_mtime > max_age_s):
         return sync()
-    return json.loads(SLOTS_FILE.read_text())
+    return json.loads(f.read_text())
 
 
 def studio_tasks() -> list[dict]:
-    if not TASKS_FILE.exists():
+    if not tasks_file().exists():
         sync()
-    return json.loads(TASKS_FILE.read_text())
+    return json.loads(tasks_file().read_text())
 
 
 def repo_usage() -> collections.Counter:

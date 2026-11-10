@@ -245,6 +245,20 @@ def _slots_file() -> dict:
     return json.loads(p.read_text()) if p.exists() else {"synced_at": None, "groups": []}
 
 
+def draft_open(meta: dict) -> int:
+    """Open Studio tasks with exactly a draft's five seeds, as of the last slots sync."""
+    want = slot_line(meta.get("slot") or {})
+    return sum(int(g.get("count") or 0) for g in _slots_file().get("groups") or []
+               if slot_line(g.get("slot") or {}) == want)
+
+
+def draft_of(meta: dict) -> dict | None:
+    """{since, open} for a task folder with no Studio slot yet, else None."""
+    if not workspace.is_draft(meta):
+        return None
+    return {"since": (meta.get("draft") or {}).get("at") or meta.get("created_at"), "open": draft_open(meta)}
+
+
 def slots_summary() -> dict:
     s = _slots_file()
     total = sum(g["count"] for g in s["groups"])
@@ -794,7 +808,7 @@ def task_base(d: Path, running: set[str] | None = None) -> dict:
         if r["kind"] == "calib":
             r["recommend"] = dom.facts.recommend(r["facts"], slot)
     base = {"short": d.name, "dir": d, "meta": meta, "sub": sub, "lead": lead, "slot": slot, "texts": texts,
-            "runs": runs, "label": _label(meta, lead, d), "claude_min": total}
+            "runs": runs, "label": _label(meta, lead, d), "claude_min": total, "draft": draft_of(meta)}
     mon = monitor_of(d, meta, {r["name"]: r["container_up"] for r in runs})
     base["monitor"] = mon
     if mon and mon.get("host_name") and mon.get("up") and not mon.get("collected") \
@@ -821,12 +835,15 @@ def task_state(base: dict, lane: dict, jobs: list[dict]) -> dict:
 def summary_of(ts: dict) -> dict:
     meta, st = ts["meta"], ts["stage"]
     studio = meta.get("studio") or {}
+    draft = draft_of(meta)
     return {
-        "short": ts["short"], "task_id": meta["task_id"], "task_name": meta["task_name"], "label": ts["label"],
+        "short": ts["short"], "task_id": meta.get("task_id"), "task_name": meta["task_name"], "label": ts["label"],
         "repo": meta["repo"], "slot": ts["slot"], "stage": st["stage"], "stage_label": st["label"],
         "stage_run": st.get("run"),
-        "studio": {"status": studio.get("status") or "Writing",
-                   "url": f"{config.STUDIO}/annotator/tasks/{meta['task_id']}/?campaignId={config.CAMPAIGN_ID}"},
+        "studio": {"status": "Draft" if draft else (studio.get("status") or "Writing"),
+                   "url": (f"{config.STUDIO}/annotator/tasks/{meta['task_id']}/?campaignId={config.CAMPAIGN_ID}"
+                           if meta.get("task_id") else None)},
+        "draft": draft,
         "lead_id": meta.get("lead_id"), "claude_min": ts["claude_min"], "my_min": _my_min(ts["dir"]),
         "updated_at": _updated_at(ts["dir"]), "submission_run": submission_run(meta, ts["dir"]),
         "submission_run_chosen": meta.get("submission_run"),
@@ -963,11 +980,11 @@ def task_detail(ts: dict) -> dict:
         "summary": summary, "sections": sections, "ratings": ts["ratings"],
         "runs": [_public_run(r) for r in ts["runs"]],
         "decisions": meta.get("decisions") or {}, "ready": meta.get("ready"),
-        "studio": {"status": st.get("status") or "Writing", "saved_at": (meta.get("pushed") or {}).get("at"),
+        "studio": {"status": summary["studio"]["status"], "saved_at": (meta.get("pushed") or {}).get("at"),
                    "changed_since_save": ts["changed_since_push"] or [], "feedback": st.get("feedback"),
                    "qc": qc, "url": summary["studio"]["url"], "polled_at": st.get("polled_at"),
                    "times_submitted": st.get("times_submitted") or 0, "fields": snap.get("fields"),
-                   "fields_at": snap.get("at")},
+                   "fields_at": snap.get("at"), "draft": summary["draft"]},
         "gists": meta.get("gists", {}), "lead": ts["lead"], "opportunity": None if ts["lead"] else _opportunity(meta),
         "checklist": _checklist(ts, sections, qc),
         "upstream_mentions": _upstream(ts), "discard": _discard_view(ts),

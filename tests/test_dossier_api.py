@@ -47,6 +47,7 @@ class ApiTest(unittest.TestCase):
         self._tmp = tempfile.TemporaryDirectory()
         store.use_data_dir(Path(self._tmp.name))
         self.p = [mock.patch.object(worker.WORKER, "kick"), mock.patch.object(worker.WORKER, "start"),
+                  mock.patch.object(worker.settings, "path", lambda: Path(self._tmp.name) / "settings.json"),
                   mock.patch.object(api_dossier.candidates, "open_combos",
                                     lambda: {("Modify", "Backend / API", "Enterprise-grade"): 45})]
         for p in self.p:
@@ -80,7 +81,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual((body["target"], body["paused"]), (10, True))
         self.assertEqual(set(body["worker"]), {"running", "current", "busy", "paused", "paused_reason",
-                                               "backoff_until"})
+                                               "backoff_until", "model"})
         self.assertEqual([i["status"] for i in body["items"]], ["ready", "generating", "queued", "declined"])
         ready = body["items"][0]
         self.assertEqual(ready["headline"], valid_doc()["headline"])
@@ -135,11 +136,22 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((s, b["stopping"]), (200, [self.ids[0]]))
         self.assertEqual(store.load()["stop"], {self.ids[0]: "stopped by pause"})
         self.assertEqual(set(b["worker"]), {"running", "current", "busy", "paused", "paused_reason",
-                                            "backoff_until"})
+                                            "backoff_until", "model"})
         s, b = call("PUT", "/api/dossiers/worker", {"paused": True, "stop": "yes"})
         self.assertEqual(s, 400)
         s, b = call("PUT", "/api/dossiers/worker", {"paused": False})
         self.assertEqual((s, b["paused"], b["stopping"]), (200, False, []))
+
+    def test_worker_model_is_set_through_the_same_route(self):
+        from johto import settings
+        with mock.patch.object(settings, "path", lambda: Path(self._tmp.name) / "settings.json"):
+            s, b = call("PUT", "/api/dossiers/worker", {"model": "gemini"})
+            self.assertEqual(s, 400)
+            s, b = call("PUT", "/api/dossiers/worker", {"model": "codex"})
+            self.assertEqual((s, b["model"], b["model_word"], b["worker"]["model"]), (200, "codex", "Codex CLI", "codex"))
+            self.assertEqual(settings.get("dossier_model"), "codex")
+            s, b = call("PUT", "/api/dossiers/worker", {"model": "claude"})
+            self.assertEqual((s, b["model"], b["worker"]["model"]), (200, "claude", "claude"))
 
     def test_stop_worker_shuts_down(self):
         with mock.patch.object(api_dossier.worker, "shutdown") as sd:

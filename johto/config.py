@@ -39,6 +39,8 @@ PREWORK_HOME = Path(os.environ.get("JOHTO_PREWORK_HOME") or Path.home() / ".merc
 CLAUDE_BIN_SET = bool(os.environ.get("JOHTO_CLAUDE_BIN"))
 CLAUDE_BIN = os.environ.get("JOHTO_CLAUDE_BIN") or (
     "/nonexistent/claude-is-off-in-fake-mode" if FAKE else str(Path.home() / ".local/bin/claude"))
+# JOHTO_CODEX_BIN: the Codex CLI for dossiers written by GPT in the clone (dossier_model "codex"); `codex` on PATH.
+CODEX_BIN = os.environ.get("JOHTO_CODEX_BIN") or ("/nonexistent/codex-is-off-in-fake-mode" if FAKE else "codex")
 
 
 class RealWriteRefused(RuntimeError):
@@ -69,6 +71,8 @@ def _load_ids() -> dict:
 _IDS = _load_ids()
 BROWSER_ACCOUNT = os.environ.get("JOHTO_BROWSER_ACCOUNT") or _IDS.get("browser_account", "")
 WRITER_NAME = _IDS.get("writer_name", "")  # your name, prefilled in the Discarded Run Log
+# The GitHub account gh must be logged in as before the gists upload (the links go into the submission).
+GH_ACCOUNT = os.environ.get("JOHTO_GH_ACCOUNT") or _IDS.get("gh_account") or "austeane"
 
 API = "https://api.studio.mercor.com"
 STUDIO = "https://studio.mercor.com"

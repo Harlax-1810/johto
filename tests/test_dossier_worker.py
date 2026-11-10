@@ -27,8 +27,12 @@ class StoreCase(unittest.TestCase):
         store.use_data_dir(Path(self._tmp.name))
         self.kick = mock.patch.object(worker.WORKER, "kick")
         self.kick.start()
+        # The real data/settings.json may name codex; these tests stand in for the Claude generator.
+        self.settings = mock.patch.object(worker.settings, "path", lambda: Path(self._tmp.name) / "settings.json")
+        self.settings.start()
 
     def tearDown(self):
+        self.settings.stop()
         self.kick.stop()
         store.use_data_dir(config.DATA)
         self._tmp.cleanup()

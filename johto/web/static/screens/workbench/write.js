@@ -9,6 +9,9 @@ import { ASKS, FIELD_NAME, FIELD_LOWER, clip } from "./words.js";
 import { finishWriting, usePrimary, dropTask } from "./data.js";
 import { drops, cancelDrop } from "../surfaces/decide.js";
 import { FeedbackChecklist, selectInEditor } from "./feedback.js";
+import { useUnderstand, codeLink } from "./understand.js";
+import { AiTag } from "../../components/primitives.js";
+import { navigate } from "../../lib/store.js";
 
 const SCALE = { "Enterprise-grade": "Enterprise", "Personal-scale": "Personal" };
 const ROWS = { goal: 5, decision_points: 9, codebase: 7, initial_state: 5, validation_notes: 7, reviewer_notes: 4 };
@@ -33,6 +36,54 @@ export function Upstream({ origin }) {
     <p class="faint">Name these in Codebase understanding.</p>
     <ul class="wb-up">${up.map((u) => html`<li><a href=${u.url} target="_blank" rel="noopener">${u.title}</a>${u.state ? html` <span class="faint">${u.state}</span>` : null}</li>`)}</ul>
   </div>`;
+}
+
+const RESEARCH_FIELDS = ["goal", "decision_points", "codebase", "initial_state"];
+const SOURCE = { research: "Claude's research", dossier: "The dossier", brief: "The repo brief" };
+const OPEN_KEY = "johto.wb.research.open";
+
+function readOpen() { try { return localStorage.getItem(OPEN_KEY) !== "0"; } catch { return true; } }
+function writeOpen(v) { try { localStorage.setItem(OPEN_KEY, v ? "1" : "0"); } catch { /* per-viewer nicety only */ } }
+
+/** The research behind the field he is writing: Claude's task understanding, the dossier opportunity and the brief's
+ *  seed, grouped by what bears on this field. Read-only facts with the AI mark, so a rewrite starts from what the
+ *  task was built on. Nothing here goes into the field: he types. */
+export function Research({ short, k }) {
+  const { u, err } = useUnderstand(short);
+  const repo = u?.repo || {};
+  const [open, setOpen] = useState(readOpen);
+  if (!RESEARCH_FIELDS.includes(k)) return null;
+  const groups = u?.fields?.[k] || [];
+  const toggle = () => { setOpen(!open); writeOpen(!open); };
+  const busy = !!u && (u.state === "queued" || u.state === "generating");
+  const n = groups.reduce((a, g) => a + g.items.length, 0);
+  const head = html`<div class="ai-head wb-rs-head">
+    <button type="button" class="wb-rs-btn" aria-expanded=${open} onClick=${toggle}>
+      <${AiTag} label=${`What the task was built on, for ${FIELD_LOWER[k] || FIELD_NAME[k]}`} />
+      <span class="faint">${n ? `${n} facts` : ""}</span><span class="wb-tri">${open ? "▾" : "▸"}</span>
+    </button>
+    <button type="button" class="linkbtn" onClick=${() => navigate(`/task/${short}/understand`)}>Full research →</button>
+  </div>`;
+  if (!open) return html`<section class="ai-block wb-rs closed">${head}</section>`;
+  let body;
+  if (err && !u) body = html`<p class="faint">The research didn't load: ${err.message}</p>`;
+  else if (!u) body = html`<p class="faint">Loading the research…</p>`;
+  else if (!groups.length) body = html`<p class="faint">${busy ? "Claude is still researching the task. The dossier's notes show here once it's done."
+    : u.state === "failed" ? "The task research failed, and the dossier has nothing for this field."
+    : "Nothing in the research bears on this field."}</p>`;
+  else body = html`<div class="wb-rs-body">
+    ${busy ? html`<p class="faint">Claude is researching the task again. This is the older research.</p>` : null}
+    ${groups.map((g) => html`<div class=${`wb-rs-g src-${g.source}`}>
+      <div class="wb-rs-gh"><span class="label-sm">${g.head}</span><span class="wb-rs-src">${SOURCE[g.source] || g.source}</span></div>
+      ${g.note ? html`<p class="wb-rs-note">${g.note}</p>` : null}
+      <ul class="wb-rs-l">${g.items.map((it) => {
+        const href = it.url || (it.path ? codeLink(repo.full_name, repo.commit, it.path) : null);
+        return html`<li>${it.path ? (href ? html`<a href=${href} target="_blank" rel="noopener"><code>${it.path}</code></a> `
+          : html`<code>${it.path}</code> `) : null}${it.text}${it.url && !it.path ? html` <a href=${it.url} target="_blank" rel="noopener">↗</a>` : null}</li>`;
+      })}</ul>
+    </div>`)}
+  </div>`;
+  return html`<section class="ai-block wb-rs" aria-label="The research behind this field">${head}${body}</section>`;
 }
 
 /** One line of his goal above the fields that build on it, with Show to read it all in place. */
@@ -185,6 +236,7 @@ export function WriteStep({ short, task, wb, tab, setTab, readOnly, findingReq, 
       ${["decision_points", "codebase"].includes(k) ? html`<${GoalPreview} text=${task.sections?.goal?.text}
           onEdit=${() => setTab("goal")} />` : null}
       ${k === "codebase" ? html`<${Upstream} origin=${wb.origin} />` : null}
+      <${Research} short=${short} k=${k} />
       ${k === "ratings" ? html`<${Ratings} short=${short} task=${task} readOnly=${readOnly} runMinutes=${wb.run?.minutes} />
           <div class="wb-ed-meta"><span></span><span class="wb-ed-extra">${nextBtn}</span></div>`
         : s ? html`<${Editor} key=${k} short=${short} sectionKey=${k} section=${s} autofocus=${!readOnly && !fb}

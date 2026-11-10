@@ -113,39 +113,45 @@ function Folded({ title, count, children, open: start = false }) {
   </div>`;
 }
 
-/** The coverage flag and, after the pack is copied, the paste box for GPT Pro's reply (his press saves it). */
-function Coverage({ short, cov, onSaved }) {
+/** The coverage flag and, after the pack is copied, the paste box for GPT Pro's reply (his press saves it).
+ * replaceReq (a counter from the pane's "Re-enter the review") opens the same box in replace mode: the run's
+ * saved review goes and the pasted one takes its place, findings read again. */
+function Coverage({ short, cov, onSaved, replaceReq }) {
   const [busy, setBusy] = useState(false);
   const [paste, setPaste] = useState(false);
+  const [replace, setReplace] = useState(false);
   const [text, setText] = useState("");
   const [saving, setSaving] = useState(false);
+  useEffect(() => { if (replaceReq) { setReplace(true); setPaste(true); } }, [replaceReq]);
   if (!cov?.flag && !paste) return null;
+  const close = () => { setPaste(false); setReplace(false); };
   async function pack() {
     setBusy(true);
     const j = await reviewLatest(short);
     setBusy(false);
-    if (j?.state === "succeeded" || isDemo()) setPaste(true);
+    if (j?.state === "succeeded" || isDemo()) { setReplace(false); setPaste(true); }
   }
   async function save() {
     if (!text.trim()) return;
     setSaving(true);
-    const r = await saveReview(short, text, cov?.turns || null);
+    const r = await saveReview(short, text, cov?.turns || null, { replace });
     setSaving(false);
-    if (r) { setText(""); setPaste(false); onSaved?.(); }
+    if (r) { setText(""); close(); onSaved?.(); }
   }
   return html`<div class="wb-cov">
     ${cov?.flag ? html`<div class="flag wb-cov-flag" role="status">
       <div class="flag-text">${cov.flag}</div>
       <div class="flag-acts">
         <button type="button" class="btn sm" disabled=${busy} onClick=${pack}>${busy ? "Building the pack…" : cov.action}</button>
-        ${paste ? null : html`<button type="button" class="btn sm quiet" onClick=${() => setPaste(true)}>Paste a reply</button>`}
+        ${paste ? null : html`<button type="button" class="btn sm quiet" onClick=${() => { setReplace(false); setPaste(true); }}>Paste a reply</button>`}
       </div>
     </div>` : null}
     ${paste ? html`<div class="wb-paste">
-      <label class="label-sm" for="wb-paste">Paste GPT Pro's reply</label>
+      <label class="label-sm" for="wb-paste">${replace ? "Paste the new reply" : "Paste GPT Pro's reply"} <span class="faint">(its Markdown, or the API's JSON message)</span></label>
+      ${replace ? html`<p class="wb-fp-note">It takes the place of the saved review of this run, and the findings are read again. Findings only that reply gave are dropped; rows you marked stay.</p>` : null}
       <textarea id="wb-paste" rows="5" value=${text} onInput=${(e) => setText(e.currentTarget.value)} spellcheck=${false}></textarea>
-      <div class="hstack"><${Btn} size="sm" kind="primary" label=${saving ? "Saving…" : "Save the review"} disabled=${!text.trim() || saving} onClick=${save} />
-        <${Btn} size="sm" kind="quiet" label="Not now" onClick=${() => setPaste(false)} /></div>
+      <div class="hstack"><${Btn} size="sm" kind="primary" label=${saving ? "Saving…" : replace ? "Replace the review" : "Save the review"} disabled=${!text.trim() || saving} onClick=${save} />
+        <${Btn} size="sm" kind="quiet" label="Not now" onClick=${close} /></div>
     </div>` : null}
   </div>`;
 }
@@ -183,6 +189,7 @@ export function FindingsPanel({ short, wb, field, focusReq, lit, onChanged, read
   const [focusRow, setFocusRow] = useState(null);
   const [openRow, setOpenRow] = useState(null);
   const [sorting, setSorting] = useState(false);
+  const [replaceReq, setReplaceReq] = useState(0);   // "Re-enter the review": opens the paste box in replace mode
   const ref = useRef(null);
 
   useEffect(() => { setView(fieldGroups(field) ? "field" : "all"); }, [field]);
@@ -299,10 +306,11 @@ export function FindingsPanel({ short, wb, field, focusReq, lit, onChanged, read
         <${Menu} size="sm" title="More" items=${[
           rows.length ? { label: "Sort findings", run: () => setSorting(true) } : null,
           { label: "Read the reviews again", run: async () => { await rereadReviews(short); onChanged?.(); } },
+          wb.findings?.has_review && !readOnly ? { label: "Re-enter the review", run: () => setReplaceReq((n) => n + 1) } : null,
         ]} />
       </div>
     </div>
-    ${readOnly ? null : html`<${Coverage} short=${short} cov=${cov} onSaved=${onChanged} />`}
+    ${readOnly ? null : html`<${Coverage} short=${short} cov=${cov} onSaved=${onChanged} replaceReq=${replaceReq} />`}
     ${wb.findings?.plain_state === "pending" || wb.findings?.fallback ? html`<p class="wb-fp-note">${wb.findings?.plain_state === "pending"
       ? "Writing the findings in plain words. Until then, open a card to read the review's own words."
       : "Some findings aren't in plain words yet. Open a card to read the review's own words."}</p>` : null}

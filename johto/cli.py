@@ -75,7 +75,7 @@ def print_qc(audit: dict) -> int:
 def cmd_sync(a):
     s = slots.sync()
     print(f"{sum(g['count'] for g in s['groups'])} open slots in {len(s['groups'])} combinations "
-          f"(saved {slots.SLOTS_FILE.relative_to(config.ROOT)})")
+          f"(saved {slots.slots_file().relative_to(config.ROOT)})")
 
 
 def cmd_slots(a):
@@ -214,6 +214,26 @@ def cmd_start(a):
     for w in actions.check_repo_allowed(repo):
         print(f"warning: {w}")
 
+    if a.draft:
+        # No Studio: the folder alone. The slot is claimed later with `johto claim`, which also fills Studio.
+        if not want.get("action"):
+            raise SystemExit("A draft needs its seeds: pass --lead ID, or --slot 'Action | Domain | Codebase type'.")
+        want["prompt_style"] = want.get("prompt_style") or "Casual prose"
+        want["interaction_mode"] = want.get("interaction_mode") or "Async/autonomous"
+        d = actions.draft(want, repo, lead)
+        print(f"\nDraft: {d.name}  ({slots.slot_key(want)}; no Studio slot yet)")
+        print(f"Repo:  {repo['pinned_url']}  [{repo['language']}]")
+        if lead:
+            print(f"Lead:  {lead.get('title')}")
+        n = actions.draft_open(workspace.load(d))
+        print(f"Open slots with these seeds right now: {n}")
+        print(f"\nTask folder: {d}")
+        print(f"  brief:      {d / 'brief.md'}")
+        print(f"  write here: {d / 'submission.md'}")
+        print(f"Next: write the Opening Prompt, then `johto lane {d.name} validate`. When a slot opens, `johto claim "
+              f"{d.name}` claims it and saves everything to Studio.")
+        return
+
     me = actions.me()
     if a.task:
         t = S().find_task(a.task)
@@ -256,6 +276,48 @@ def cmd_start(a):
     if a.codebase_check:
         print("\nRunning Studio's Codebase Check (advisory)...")
         cmd_qc(argparse.Namespace(task=d.name, spec="Codebase Check", no_wait=False))
+
+
+BIND_STEP_TEXT = {"recheck": "Checking the slot in Studio...", "claiming": "Claiming in Studio...",
+                  "saving_repo": "Saving repo name, pinned URL and language in Studio...",
+                  "binding": "Attaching the slot to the task folder..."}
+
+
+def cmd_claim(a):
+    """Claim an open slot for a draft, then save everything the folder holds to Studio."""
+    d = task_dir_arg(a.task)
+    meta = workspace.load(d)
+    if not workspace.is_draft(meta):
+        raise SystemExit(f"{d.name} already has a Studio slot ({meta['task_name']}). `johto push {d.name}` saves it.")
+    slot = meta["slot"]
+    hit = None
+    if not a.task_id:
+        hit = actions.open_slot_for(slot)
+        if not hit:
+            raise SystemExit(f"No open slot for {slots.slot_key(slot)} right now. `johto slots --refresh` looks again.")
+    print(f"Task:   {a.task_id or hit['task_name']}  ({slots.slot_key(slot)})")
+    print(f"Folder: {d}  ({meta.get('label') or meta['task_name']})")
+    vrun, rec = actions.validation_run(d, None)
+    has_run = bool(rec and rec.get("transcript") and rec.get("diff"))
+    fields = actions.fields(d, None)
+    print(f"Ready:  {len(fields)} fields" + (f", {vrun} collected" if has_run else ", no collected run yet"))
+    if not confirm("Claim this slot in Studio and save everything there?", a.yes):
+        raise SystemExit("Not claimed.")
+    res = actions.bind(d, a.task_id, on_step=lambda step: BIND_STEP_TEXT.get(step) and print(BIND_STEP_TEXT[step]))
+    print(f"Claimed {res['task_name']} for {d.name}.")
+    if a.no_fill:
+        print("Not saved (--no-fill). `johto push` saves the fields; `johto submit` does the rest.")
+        return
+    if has_run:
+        g = actions.upload_gists(d)
+        print("Gists: " + (", ".join(g["uploaded"]) + " uploaded" if g.get("uploaded") else "already current"))
+    else:
+        print("No collected run with a diff yet, so the gists wait.")
+    pushed = actions.push(d, None, checked=True)
+    print(f"Saved {pushed['saved']} fields to {res['task_name']}.")
+    aid = actions.start_qc(d, "AutoQC", checked=True)
+    print("AutoQC started." if aid else "Studio didn't start AutoQC; run `johto qc` later.")
+    print(studio.task_url(res["task_id"]))
 
 
 def cmd_lane(a):
@@ -395,6 +457,7 @@ def cmd_submit(a):
     d = task_dir_arg(a.task)
     run = _run_arg(a, d)
     meta = workspace.load(d)
+    actions.need_slot(meta, d)
     problems = cmd_check(a)
     errors = [p for p in problems if p[0] == lint.ERROR]
     if errors and not a.force:
@@ -493,6 +556,7 @@ def cmd_pack(a):
 def cmd_open(a):
     d = task_dir_arg(a.task)
     meta = workspace.load(d)
+    actions.need_slot(meta, d)
     print(studio.task_url(meta["task_id"]))
 
 
@@ -556,8 +620,19 @@ def main(argv=None):
     s.add_argument("--mode", help="interaction mode")
     s.add_argument("--lang", help="primary language override")
     s.add_argument("--codebase-check", action="store_true", help="run Studio's Codebase Check after")
+    s.add_argument("--draft", action="store_true",
+                   help="make the task folder without claiming a slot (no Studio); `johto claim` later claims one "
+                        "and saves everything. Needs the full slot: --lead or --slot, with --style and --mode "
+                        "(default Casual prose, Async/autonomous)")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(func=cmd_start)
+
+    s = sub.add_parser("claim", help="claim an open slot for a draft task, then save every field and the gists to Studio")
+    s.add_argument("task")
+    s.add_argument("--task-id", help="a specific open Studio task (id) instead of the first open one with the seeds")
+    s.add_argument("--no-fill", action="store_true", help="claim only; don't save the fields and gists")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(func=cmd_claim)
 
     s = sub.add_parser("lane", help="set up a fresh lane (new folder) for a run")
     s.add_argument("task")

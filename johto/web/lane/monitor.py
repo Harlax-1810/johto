@@ -41,6 +41,10 @@ RULE_RE = re.compile(r"^\s*[─━]{12,}\s*$")
 # options are indented, so they never match.
 INPUT_RE = re.compile(r"^[❯>](?:\s(.*))?$")
 LOGIN_SCREEN_RE = re.compile(r"Select login method|Paste code here|Choose the text style|Do you trust the files", re.I)
+# The sign-in link Claude Code prints when the browser can't be opened from the lane. The screen wraps it over
+# several lines (hard breaks, so tmux's -J can't join them); login_url() stitches the pieces back together.
+LOGIN_URL_RE = re.compile(r"https://(?:[\w-]+\.)*(?:claude\.ai|claude\.com|anthropic\.com)/\S*oauth\S*")
+URL_PIECE_RE = re.compile(r"^[A-Za-z0-9._~:/?#@!$&'()*+,;=%-]+$")
 ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-_]")
 # A Claude Code process: argv[0] is `claude` (the native binary). Never matches tmux's
 # `... new-session ... claude-dev`, the `ps` that lists it, or a zombie shown as `[claude]`.
@@ -384,6 +388,26 @@ def question_of(text: str | None) -> str | None:
 
 # --- the screen -------------------------------------------------------------------------------------------
 
+def login_url(lines: list[str]) -> str | None:
+    """The sign-in link on the screen, wrapped lines joined, or None. The last one wins (a retry prints a new one)."""
+    found = None
+    for i, ln in enumerate(lines):
+        m = LOGIN_URL_RE.search(ln)
+        if not m:
+            continue
+        url = m.group(0)
+        if m.end() < len(ln.rstrip()):          # text after the link on the same line: the link ended there
+            found = url
+            continue
+        for nxt in lines[i + 1:i + 12]:
+            piece = nxt.strip()
+            if not piece or not URL_PIECE_RE.match(piece) or len(piece) < 8:
+                break
+            url += piece
+        found = url
+    return found
+
+
 def screen(pane: str | None) -> dict | None:
     """Facts from a pane capture: the input box and its text, working, permission, login, rate limit."""
     if pane is None:
@@ -419,7 +443,7 @@ def screen(pane: str | None) -> dict | None:
             "working": bool(WORKING_RE.search("\n".join(lines[-12:]))),
             "permission": permission, "login": bool(LOGIN_RE.search(text)),
             "login_screen": bool(LOGIN_SCREEN_RE.search("\n".join(lines[-25:]))),
-            "rate": rate, "last_line": last[:200]}
+            "rate": rate, "last_line": last[:200], "login_url": login_url(lines)}
 
 
 # --- the classifier ---------------------------------------------------------------------------------------

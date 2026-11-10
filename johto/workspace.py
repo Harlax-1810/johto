@@ -90,7 +90,33 @@ INITIAL_STATE = """## Initial State / Setup
 
 
 def short_name(task_name: str) -> str:
-    return task_name.replace("Task ", "").strip()
+    return re.sub(r"^(?:Task|Draft) ", "", task_name or "").strip()
+
+
+def is_draft(meta: dict) -> bool:
+    """A task folder with no Studio slot yet: prepared locally, claimed and filled when a slot opens."""
+    return not (meta or {}).get("task_id")
+
+
+def new_draft_short() -> str:
+    """A short name for a draft folder (d-xxxxxx), unused under tasks/."""
+    import secrets
+    alphabet = "abcdefghijkmnpqrstuvwxyz23456789"
+    while True:
+        short = "d-" + "".join(secrets.choice(alphabet) for _ in range(6))
+        if not (config.TASKS / short).exists():
+            return short
+
+
+def lane_task(meta: dict, d: Path | None = None) -> str:
+    """The task name a lane is set up under. Mercor's prework.py takes only 'Task <8 letters or digits>' or a
+    Studio id, so a draft (no slot yet) uses its folder name squeezed into that shape: 'Draft d-amgirf' -> 'Task damgirf0'.
+    The lane keeps that name; nothing in Studio sees it."""
+    if not is_draft(meta):
+        return meta["task_name"]
+    short = d.name if d is not None else short_name(meta.get("task_name") or "")
+    code = re.sub(r"[^a-z0-9]", "", short.lower())
+    return "Task " + (code + "00000000")[:8]
 
 
 def task_dir(name: str) -> Path:
@@ -175,7 +201,10 @@ def render_brief(meta: dict, lead: dict | None) -> str:
         "",
         "Research notes for you only. Nothing here goes into Studio.",
         "",
-        f"- Studio: {config.STUDIO}/annotator/tasks/{meta['task_id']}/?campaignId={config.CAMPAIGN_ID}",
+        (f"- Studio: {config.STUDIO}/annotator/tasks/{meta['task_id']}/?campaignId={config.CAMPAIGN_ID}"
+         if meta.get("task_id") else
+         "- Studio: no slot yet. Claim one from the task page (or `johto claim <task>`) when a slot with these "
+         "seeds opens; everything written here goes to Studio then."),
         f"- Repo: {r.get('pinned_url')}",
         f"- Language: {r.get('language')}",
         "",

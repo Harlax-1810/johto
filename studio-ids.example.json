@@ -1,6 +1,7 @@
 {
   "browser_account": "you@example.com",
   "writer_name": "Your Name",
+  "gh_account": "your-github-login",
   "campaign_id": "camp_...",
   "company_id": "comp_...",
   "account_id": "acct_...",

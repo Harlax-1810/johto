@@ -146,6 +146,7 @@ const STEP_WORDS = {
   rating: "Rating slot options", researching: "Researching the repo", brief: "Writing the brief",
   cloning: "Copying the repo", upstream: "Reading upstream threads", writing: "Writing it up",
   planning: "Reading the review", checking: "Checking your fields",
+  binding: "Attaching the slot", folder: "Making the task folder", lanes: "Checking the lanes", moving: "Moving the folder",
 };
 export function stepWord(step) {
   if (!step) return "";

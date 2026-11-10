@@ -39,7 +39,7 @@ LANE_KINDS = {"lane_waiting", "lane_permission", "lane_login", "lane_paste", "la
 TALK_KINDS = {"lane_waiting", "lane_problem", "lane_answer", "lane_async_done"}
 BLOCKER_KINDS = {"setup_failed", "wrong_model", "collect_failed", "blocker_studio", "blocker_docker", "blocker_disk",
                  "blocker_gh"}
-WRITING_KINDS = {"write_prompt", "write_details", "rate", "feedback", "fix_qc", "save", "submit", "rejected"}
+WRITING_KINDS = {"write_prompt", "write_details", "rate", "feedback", "fix_qc", "save", "claim_slot", "submit", "rejected"}
 START_KINDS = {"start_validation", "lane_start"}
 NOW_ONLY = {"decide", "log_discard"}          # their controls live on the Now card
 
@@ -399,6 +399,8 @@ def verb_for(it: dict, ctx: dict) -> str:
         return "Read Claude's answer"
     if k == "lane_async_done":
         return "End the run"
+    if k == "claim_slot":
+        return "Claim a slot"
     return plain_fact(t).rstrip(".") or t
 
 
@@ -446,7 +448,7 @@ def place_for(it: dict, ctx: dict) -> dict:
         return {"kind": "task", "href": f"{base}#step=write&field=ratings"}
     if k == "feedback":
         return {"kind": "task", "href": f"{base}#step=write&fb=1"}
-    if k in ("fix_qc", "save", "submit"):
+    if k in ("fix_qc", "save", "claim_slot", "submit"):
         return {"kind": "task", "href": f"{base}#step=submit"}
     if k == "rejected":
         return {"kind": "task", "href": base}
@@ -580,7 +582,8 @@ def writing_body(it: dict, ctx: dict) -> dict:
         out["field_words"] = "Rejected"
         out["fact"] = plain_fact(it.get("reason"))
     else:
-        out["field_words"] = {"save": "Save to Studio", "submit": "Submit", "fix_qc": "Automatic checks"}.get(k, "")
+        out["field_words"] = {"save": "Save to Studio", "submit": "Submit", "fix_qc": "Automatic checks",
+                              "claim_slot": "Claim a slot"}.get(k, "")
         out["fact"] = plain_fact(it.get("reason"))
     out["path"] = path_for(ctx) if ctx.get("stage") else []
     return out

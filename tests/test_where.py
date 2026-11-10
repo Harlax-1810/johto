@@ -36,7 +36,7 @@ class Base(unittest.TestCase):
             p.start()
         fake.reset()
         fake.QC_DELAY_S = 0
-        fake_gh.ACCOUNT = "austeane"
+        fake_gh.ACCOUNT = fake_gh.GH_ACCOUNT
         runmon.clear()
         data._RUNNING["at"] = 0.0
         lead = actions.load_lead(fx.LEAD_ID)

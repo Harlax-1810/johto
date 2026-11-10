@@ -428,7 +428,7 @@ class FocusTest(unittest.TestCase):
         s = generate.build_prompt(entry, {}, "o__r__aaaaaaaa")
         self.assertIn("## Open slots this research is for", s)
         self.assertIn("- Understand / Assess | Other software | Enterprise-grade (written as a short casual message", s)
-        self.assertIn("Claude works alone until it is done", s)
+        self.assertIn("works alone on one prompt for about 45 minutes", s)
         self.assertIn("- Operate | Games | Personal-scale\n", s + "\n")
         self.assertNotIn("bad", generate.focus_section(entry))
         # The section sits before the output rules, so the output rules stay last.

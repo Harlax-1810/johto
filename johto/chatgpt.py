@@ -802,7 +802,9 @@ def use_tab(mode="ours", start="https://chatgpt.com/"):
     except Exception:
         prev = None
     try:
-        tid = new_tab(start, account=ACCOUNT)
+        # The multi-account fork's new_tab takes the profile account; the released harness takes only the URL.
+        import inspect as _i
+        tid = new_tab(start, account=ACCOUNT) if "account" in _i.signature(new_tab).parameters else new_tab(start)
     except StopIteration:
         raise Fail("no_window", "No ordinary tab in that profile")
     except RuntimeError as e:

@@ -456,6 +456,10 @@ def _jsonl(p: Path) -> list[dict]:
 
 # --- next step and actions -------------------------------------------------------------------------------------
 
+def _task_url(meta: dict) -> str | None:
+    return studio.task_url(meta["task_id"]) if meta.get("task_id") else None
+
+
 def next_step(t: dict, lane: dict, run: dict, text: dict, traj: dict | None) -> dict:
     """{text, why, command, also}: Home's step for this task, plus what blocks submitting."""
     stage = (t.get("stage") or {}).get("stage")
@@ -463,7 +467,7 @@ def next_step(t: dict, lane: dict, run: dict, text: dict, traj: dict | None) -> 
         return {"text": "Accepted. Nothing left to do.", "why": "", "command": None, "also": None}
     if stage == "rejected":
         return {"text": "Rejected. Read the reviewer's feedback in Studio.", "why": "",
-                "command": studio.task_url(t["meta"]["task_id"]), "also": None}
+                "command": _task_url(t["meta"]), "also": None}
     try:
         row, rr = _queue_row(t, lane)
     except Exception as e:   # the queue is the web app's; a failure there leaves the rest of the card
@@ -490,7 +494,12 @@ def action_list(d: Path, meta: dict, t: dict, run: dict, text: dict) -> list[dic
     """Exact commands for what Austin may do next, most useful first."""
     short = d.name
     stage = (t.get("stage") or {}).get("stage")
-    acts = [{"label": "Open Studio", "command": studio.task_url(meta["task_id"])}]
+    if workspace.is_draft(meta):
+        n = actions.draft_open(meta)
+        acts = [{"label": ("Claim a slot and fill Studio" if stage == "ready_to_save" else "Claim a slot")
+                 + (f" ({n} open)" if n else " (none open now)"), "command": f"johto claim {short}"}]
+    else:
+        acts = [{"label": "Open Studio", "command": _task_url(meta)}]
     if stage in DONE or stage == "in_review":
         return acts
     name = run.get("name")
@@ -513,7 +522,7 @@ def action_list(d: Path, meta: dict, t: dict, run: dict, text: dict) -> list[dic
         acts.append({"label": f"Send {run_word(name)} for review", "command": f"johto review send {short} {name}"})
     if name:
         acts.append({"label": "Claude's minutes, turn by turn", "command": f"johto time {short} {name}"})
-    if stage == "ready_to_save":
+    if stage == "ready_to_save" and not workspace.is_draft(meta):
         acts.append({"label": "Save to Studio", "command": f"johto push {short}"})
     if stage == "fix_qc":
         acts.append({"label": "AutoQC results", "command": f"johto qc {short}"})
@@ -568,7 +577,9 @@ def card(task_dir: Path, *, touch: bool = True, live: bool = True, source: str =
         "since": since_lines(d, meta, (last or {}).get("at")),
         "since_at": (last or {}).get("at"),
         "focus": focus_block(d),
-        "studio_url": studio.task_url(meta["task_id"]),
+        "studio_url": _task_url(meta),
+        "draft": {"since": (meta.get("draft") or {}).get("at"), "open": actions.draft_open(meta),
+                  "slot": actions.slot_key(meta.get("slot") or {})} if workspace.is_draft(meta) else None,
         "generated_at": stages.now_iso(),
         "offline": not live,
     }

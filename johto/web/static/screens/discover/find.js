@@ -7,7 +7,7 @@ import { pushContext } from "../../lib/keys.js";
 import { slotWords, styleWord, modeWord, scaleWord, actionWord, domainWord } from "../../lib/words.js";
 import { Stage, Lede, Btn, Menu, SlotPill, Dot, AiTag, Empty, Sheet } from "../../components/primitives.js";
 import { useListing, facets, setFacets, anyFacet, matches, groupCounts, facetOptions, howOnly, keyOf, slotOfKey,
-         DECLINE, decline, restore, refill, setPaused } from "./data.js";
+         DECLINE, decline, restore, refill, setPaused, setModel, RESEARCH_MODELS } from "./data.js";
 import { yoursWords, openWords } from "./words.js";
 import { SlotMapSheet } from "./slotmap.js";
 
@@ -17,14 +17,19 @@ export function NotForMe({ id, name, onDone, kind = "secondary", size = "md" }) 
     items=${[{ note: "Why set it aside?" }, ...DECLINE.map(([k, l]) => ({ label: l, run: async () => { if (await decline(id, name, k)) onDone?.(); } }))]} />`;
 }
 
-/** The Research menu: research more, pause or resume, and the repos set aside. */
+/** The Research menu: research more, pause or resume, who writes the dossiers, and the repos set aside. */
 export function ResearchMenu({ research, setAside, onSetAside }) {
   const r = research || {};
+  const model = r.model || "claude";
   return html`<${Menu} label="Research ▾" title="Repo research" kind="secondary" items=${[
     r.today_line ? { note: r.today_line } : null,
     { label: "Research more repos", run: refill },
     r.paused ? { label: "Resume research", run: () => setPaused(false) }
       : { label: r.generating ? `Stop researching ${r.generating} and pause` : "Pause research", run: () => setPaused(true) },
+    "-",
+    { note: `Dossiers are written by ${r.model_word || "Claude Code"}. Scouting stays with Claude Code.` },
+    ...RESEARCH_MODELS.filter(([k]) => k !== model).map(([k, word]) => ({ label: `Write dossiers with ${word}`, run: () => setModel(k),
+      title: k === "codex" ? "The Codex CLI runs GPT inside the clone, read-only; from the next repo on" : "Headless Claude Code reads the clone; from the next repo on" })),
     "-",
     { label: `Repos you set aside${setAside?.length ? ` (${setAside.length})` : ""}`, run: onSetAside, disabled: !setAside?.length,
       why: "Nothing is set aside" },
@@ -173,7 +178,8 @@ export default function FindWork() {
 
   return html`<${Stage} class="fw">
     <${Lede} title=${d?.lede?.title || "Find work"} support=${d?.lede?.support}
-      right=${html`<${Btn} kind="secondary" label="All open slots" onClick=${openSlots} />
+      right=${html`<${Btn} kind="secondary" label="Every problem" title="Every researched problem, filtered your way" onClick=${() => navigate("/research")} />
+        <${Btn} kind="secondary" label="All open slots" onClick=${openSlots} />
         <${ResearchMenu} research=${d?.research} setAside=${d?.set_aside} onSetAside=${() => setAside(true)} />`} />
     ${d ? html`<div class="fw-filters" role="group" aria-label="Show repos with open slots for">
       ${FACET_ROWS.map((spec) => html`<${Facet} spec=${spec} cells=${cells} f=${f} />`)}

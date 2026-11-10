@@ -23,7 +23,8 @@ import time
 import traceback
 from typing import Callable
 
-from . import candidates, generate, store
+from .. import settings
+from . import candidates, codex, generate, store
 
 
 def _brief():
@@ -39,6 +40,8 @@ def queue_brief(did: str, reason: str = "") -> bool:
         traceback.print_exc()
         return False
 
+MODELS = {"claude": "Claude Code", "codex": "Codex CLI"}   # settings dossier_model -> its words
+
 POLL_S = 60
 FILL_EVERY_S = 600
 FAIL_STREAK = 3
@@ -46,6 +49,26 @@ BACKOFF_S = 30 * 60
 POOL_LIMIT = 40
 MAX_RETRIES = 3  # usage-limit requeues of one item before it fails
 WATCH_S = 2.0  # how often a generation checks the index for a stop request
+
+
+# --- which model writes dossiers ------------------------------------------------------------
+
+def model_choice() -> str:
+    """The settings' dossier_model, "claude" unless it is a known other choice."""
+    m = settings.get("dossier_model")
+    return m if m in MODELS else "claude"
+
+
+def set_model(model: str) -> str:
+    if model not in MODELS:
+        raise ValueError(f"dossier_model must be one of {', '.join(MODELS)}")
+    settings.save({"dossier_model": None if model == "claude" else model})
+    return model
+
+
+def generator(model: str | None = None):
+    """generate.generate (Claude Code) or codex.generate for a model choice (the setting's when None)."""
+    return codex.generate if (model or model_choice()) == "codex" else generate.generate
 
 
 # --- queue -------------------------------------------------------------------------------
@@ -177,10 +200,12 @@ def queue_manual(entry: dict) -> str:
 
 
 def run_item(did: str, echo: Callable[[str], None] | None = None,
-             cancel: generate.Cancel | None = None) -> generate.Result:
+             cancel: generate.Cancel | None = None, model: str | None = None) -> generate.Result:
     """Generate one item now. The caller holds store.generation_lock. Does nothing (a `skipped` Result)
-    unless the item is still queued when it starts, so a decline or another run can't be overwritten."""
+    unless the item is still queued when it starts, so a decline or another run can't be overwritten.
+    `model` picks who writes it ("claude" or "codex"); the setting decides when it is None."""
     cancel = cancel or generate.Cancel()
+    model = model if model in MODELS else model_choice()
     with store.edit() as idx:
         it = store.find(idx, did)
         if it is None:
@@ -189,15 +214,16 @@ def run_item(did: str, echo: Callable[[str], None] | None = None,
             return generate.Result(error=f"it is {it['status']}, not queued", skipped=True)
         store.clear_stop(idx, did)
         it.update(status="generating", started_at=store.now_iso(), finished_at=None, error=None, errors=None,
-                  cost_usd=None, elapsed_s=None, progress={"step": "cloning", "elapsed_s": 0, "log_tail": []})
+                  cost_usd=None, elapsed_s=None, model_choice=model,
+                  progress={"step": "cloning", "elapsed_s": 0, "log_tail": []})
         entry = _entry(it)
     with _current_lock:
         _current[did] = cancel
     done = threading.Event()
     threading.Thread(target=_watch, args=(did, cancel, done), name="dossier-stop-watch", daemon=True).start()
     try:
-        res = generate.generate(entry, did, on_progress=lambda snap: store.update(did, progress=snap), echo=echo,
-                                cancel=cancel)
+        res = generator(model)(entry, did, on_progress=lambda snap: store.update(did, progress=snap), echo=echo,
+                               cancel=cancel)
     finally:
         done.set()
         with _current_lock:
@@ -337,7 +363,7 @@ def status() -> dict:
     # a brief holds the same lock: busy stays true, and brief.current() names it (the keys here are fixed)
     return {"running": WORKER.alive or busy, "current": cur, "busy": busy, "paused": bool(idx.get("paused")),
             "paused_reason": idx.get("paused_reason"),
-            "backoff_until": WORKER.backoff_until_iso()}
+            "backoff_until": WORKER.backoff_until_iso(), "model": model_choice()}
 
 
 # --- the loop ----------------------------------------------------------------------------------

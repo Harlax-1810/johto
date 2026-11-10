@@ -931,7 +931,7 @@ def create_app() -> Starlette:
     routes = [
         Route("/", index), Route("/pick", index), Route("/scout", index), Route("/finished", index),
         Route("/task/{short}", index), Route("/task/{short}/understand", index),
-        Route("/repos", index), Route("/repos/{id}", index),
+        Route("/repos", index), Route("/repos/{id}", index), Route("/research", index),
         Route("/api/state", api_state), Route("/api/events", api_events),
         Route("/api/tasks", api_tasks),
         Route("/api/tasks/{short}", api_task),

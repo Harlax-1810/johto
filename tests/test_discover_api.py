@@ -49,6 +49,69 @@ class Base(Root):
         return body
 
 
+class Research(Base):
+    """GET /api/research: every problem across every researched repo, one row each, with what the filters need."""
+
+    def test_researcher_comes_from_the_dossiers_model(self):
+        from johto.web.api_discover import researcher
+        self.assertEqual(researcher({"model": "claude-opus-5-5"}), "Claude")
+        self.assertEqual(researcher({"model": "gpt-5-pro"}), "GPT")
+        self.assertEqual(researcher({"model": "gpt-5.4"}), "GPT")
+        self.assertEqual(researcher(None), "Claude")
+
+    def test_one_row_per_problem_with_the_briefs_words_and_the_slot_fits(self):
+        self.install_example()
+        body = self.get("/api/research")
+        self.assertEqual(set(body), {"lede", "slots", "synced", "repos", "problems"})
+        self.assertEqual(body["repos"], 1)
+        rows = body["problems"]
+        self.assertEqual([r["opportunity_id"] for r in sorted(rows, key=lambda r: r["opportunity_id"])], ["o1", "o2", "o3", "o4", "o5"])
+        self.assertEqual(body["lede"]["title"], "5 researched problems across 1 repo.")
+        self.assertIn("with an open slot right now", body["lede"]["support"])
+        by = {r["opportunity_id"]: r for r in rows}
+        for r in rows:
+            self.assertEqual((r["dossier_id"], r["repo"], r["name"], r["verdict"]), (DID, REPO, "Vidlabel", "dive"))
+            self.assertEqual(r["id"], f"{DID}:{r['opportunity_id']}")
+            self.assertTrue(r["title"] and r["one_shot"] and r["size"] and r["fit_keys"], r)
+            self.assertEqual(set(r["actions"]), {f["action"] for f in r["fits"]})
+            self.assertIsNone(r["yours"])
+            self.assertEqual(r["researcher"], "Claude")
+        # A brief seed carries the brief's words; a problem the brief left out keeps the dossier's.
+        seeds = [r for r in rows if r["seed"]]
+        self.assertTrue(seeds)
+        self.assertTrue(all(r["problem"] for r in seeds))
+        o4 = by["o4"]
+        self.assertEqual((o4["one_shot"], o4["size"], o4["actions"], o4["domains"]), ("possible", "S", ["Operate"], ["DevOps / cloud"]))
+        self.assertEqual(o4["open"], 24)     # the Operate · DevOps · Enterprise group in SLOTS
+        self.assertEqual(o4["fits"][0]["variants"][0]["prompt_style"], "Casual prose")
+        self.assertEqual(by["o1"]["languages"], by["o5"]["languages"])
+        # Ordering: the repo's verdict, then how unlikely Claude is to get it in one go, then the brief's seeds first.
+        ranks = [(0 if r["one_shot"] == "unlikely" else 1, 0 if r["seed"] else 1) for r in rows]
+        self.assertEqual(ranks, sorted(ranks))
+
+    def test_a_task_from_a_seed_marks_that_row_yours(self):
+        self.install_example()
+        self.task("aaaa1111", studio={"status": "Writing"}, origin={"kind": "seed", "dossier_id": DID, "opportunity_id": "o4"})
+        rows = {r["opportunity_id"]: r for r in self.get("/api/research")["problems"]}
+        self.assertEqual(rows["o4"]["yours"], {"short": "aaaa1111", "stage": "in_flight", "stage_word": "in progress"})
+        self.assertIsNone(rows["o1"]["yours"])
+
+    def test_without_a_brief_the_dossier_speaks_and_the_demo_answers_too(self):
+        rows = self.get("/api/research")["problems"]
+        self.assertEqual(len(rows), 5)
+        self.assertTrue(all(not r["seed"] and r["verdict"] is None and r["title"] for r in rows))
+        self.assertEqual(rows[0]["problem"], "Job state lives in the queue, the database and the API cache, which disagree after a retry, so failed jobs show as running.")
+        demo = self.get("/api/research", demo=True)
+        self.assertTrue(demo["problems"])
+        self.assertTrue(all(r["dossier_id"] == DEMO_ID for r in demo["problems"]))
+
+    def test_nothing_researched_yet(self):
+        with store.edit() as idx:
+            idx["items"].clear()
+        body = self.get("/api/research")
+        self.assertEqual((body["problems"], body["repos"], body["lede"]["title"]), ([], 0, "No problems are researched yet."))
+
+
 class FindWork(Base):
     def test_shape_and_lede_with_a_brief(self):
         self.install_example()

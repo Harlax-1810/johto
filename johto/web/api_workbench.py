@@ -833,11 +833,18 @@ PASS_WORDS = {"autoqc": "Mercor's automatic checks pass", "studio_sync": "Studio
               "validation_run": "The validation run is collected and checked"}
 
 
+def _is_draft(t: dict) -> bool:
+    """No Studio slot yet (data.task_base sets "draft"; summaries carry it too)."""
+    return bool(t.get("draft") or (t.get("studio") or {}).get("draft") or (t.get("summary") or {}).get("draft"))
+
+
 def _checklist_items(t: dict) -> tuple[list[dict], list[dict], list[dict]]:
     blockers, calls, passes = [], [], []
     slot = _slot(t)
     for row in t.get("checklist") or []:
         key, status = row.get("key"), row.get("status")
+        if key == "slot" or (key == "trajectory_logs" and _is_draft(t)):
+            continue   # a draft's missing slot is step 1 of the Submit step, not an item; its logs go up with it
         if (key, status) in SAVE_SETTLES or key in ("autoqc", "lint", "upstream_hidden"):
             if key == "autoqc" and status == "pass":
                 passes.append({"title": PASS_WORDS["autoqc"]})
@@ -1035,7 +1042,9 @@ def sent_list(t: dict) -> list[dict]:
     out.append({"label": "Claude minutes", "value": f"{round(mins)}, measured" if mins is not None else "Not measured",
                 "tone": "neutral" if mins is not None else "stop", "field": None})
     log = next((c for c in t.get("checklist") or [] if c.get("key") == "trajectory_logs"), None)
-    if log:
+    if _is_draft(t):
+        out.append({"label": "Conversation log", "value": "Goes up when you claim a slot", "tone": "neutral", "field": None})
+    elif log:
         out.append({"label": "Conversation log", "value": "In Studio" if log.get("status") == "pass" else
                     ("Not checked" if log.get("status") == "pending" else "Not uploaded"),
                     "tone": "ok" if log.get("status") == "pass" else "stop" if log.get("status") == "fail" else "neutral",
@@ -1062,6 +1071,18 @@ def submit_block(t: dict, *, rows: list[dict], check: dict | None, run: str | No
     changed = [FIELD_LOWER.get(k, k) for k in st.get("changed_since_save") or []]
     save_words = ("Saves your fields and ratings, adds the conversation and changes as private links, then runs "
                   "Mercor's automatic checks. About 2 minutes.")
+    draft = st.get("draft") or (t.get("summary") or {}).get("draft")
+    if draft:
+        n = int(draft.get("open") or 0)
+        return {"blockers": blockers, "calls": calls, "passes": passes, "sent": sent_list(t), "can_submit": False,
+                "qc": qc, "saved": False,
+                "save_words": ("Takes one open slot with this task's seeds, then saves your fields and ratings, adds the "
+                               "conversation and changes as private links, and runs Mercor's automatic checks. About 2 "
+                               "minutes."),
+                "save_state": (f"{_cap(_number_word(n))} open slot{'s' if n != 1 else ''} match{'es' if n == 1 else ''}."
+                               if n else "No open slot matches right now."),
+                "submit_why": "Claim a slot first.",
+                "draft": {"open": n, "since": draft.get("since"), "slot_words": _slot_words(_slot(t))}}
     if st.get("saved_at"):
         save_state = (f"Saved {_hhmm(st['saved_at'])}. Changed since: {_list_words(changed)}." if changed
                       else f"Saved {_hhmm(st['saved_at'])}. Nothing changed since.")
@@ -1096,9 +1117,26 @@ def title_of(t: dict, origin: dict) -> str:
     return f"{name} · {problem}" if problem else f"{name} · {ACTION_WORD.get(_slot(t).get('action'), 'Task')}"
 
 
+def _slot_words(slot: dict) -> str:
+    """"Operate · Backend · Enterprise · Casual · Async": the seeds in the page's words."""
+    a = {"Understand / Assess": "Understand"}.get(slot.get("action"), slot.get("action"))
+    d = {"Backend / API": "Backend", "Web frontend": "Web", "Data / DB": "Data", "DevOps / cloud": "DevOps",
+         "Dev tooling": "Dev tools", "Developer tools": "Dev tools", "Other software": "Other"}.get(slot.get("domain"), slot.get("domain"))
+    c = {"Enterprise-grade": "Enterprise", "Personal-scale": "Personal"}.get(slot.get("codebase_type"), slot.get("codebase_type"))
+    p = {"Casual prose": "Casual", "Explicit spec": "Spec", "Error / artifact brief": "Error report"}.get(slot.get("prompt_style"), slot.get("prompt_style"))
+    m = {"Interactive/pairing": "Interactive", "Async/autonomous": "Async"}.get(slot.get("interaction_mode"), slot.get("interaction_mode"))
+    return " · ".join(str(x) for x in (a, d, c, p, m) if x)
+
+
 def studio_block(t: dict) -> dict:
     st = t.get("studio") or {}
     sm = (t.get("summary") or {}).get("studio") or {}
+    draft = st.get("draft") or (t.get("summary") or {}).get("draft")
+    if draft:
+        n = int(draft.get("open") or 0)
+        return {"url": None, "words": f"No slot yet · {n} open" if n else "No slot yet · none open", "saved_at": None,
+                "status": "Draft", "changed": [],
+                "draft": {"open": n, "since": draft.get("since"), "slot_words": _slot_words(_slot(t))}}
     fields = st.get("fields") or {}
     have = [k for k in ("opening_prompt", "goal", "decision_points", "codebase", "validation_notes")
             if str(fields.get(STUDIO_ID[k]) or "").strip()]
@@ -1113,7 +1151,7 @@ def studio_block(t: dict) -> dict:
     else:
         words = "Not saved yet"
     return {"url": st.get("url") or sm.get("url"), "words": words, "saved_at": st.get("saved_at"),
-            "status": st.get("status") or sm.get("status"), "changed": changed}
+            "status": st.get("status") or sm.get("status"), "changed": changed, "draft": None}
 
 
 def fields_block(t: dict, step: str, current: str | None, fb_fields: list[str]) -> dict:
@@ -1190,8 +1228,10 @@ def path_block(t: dict, step: str, run: dict | None, fields: dict) -> list[dict]
         sub_entry = {"id": "review", "label": "Review", "state": "done" if stage == "accepted" else
                      "blocked" if stage == "rejected" else "current", "summary": last}
     else:
+        sb = studio_block(t)
         sub_entry = {"id": "submit", "label": "Submit", "state": "current" if step == "submit" else "later",
-                     "summary": "Saved, not submitted" if st.get("saved_at") else studio_block(t)["words"]}
+                     "summary": "Saved, not submitted" if st.get("saved_at") else "Needs a slot" if sb.get("draft")
+                     else sb["words"]}
     def state(i: int) -> str:
         return "done" if i < at else "current" if i == at else "later"
     run_state = state(1)
@@ -1250,10 +1290,19 @@ def lede_of(t: dict, step: str, run: dict | None, current: str | None, submit: d
             # Save to Studio is blocked until then; the flag under that field says which words.
             name = FIELD_LOWER.get(red[0], "a field")
             return f"Every field is written. Reword the line in your {name} that repeats AI text, then save."
+        if (t.get("studio") or {}).get("draft"):
+            return "Every field is written. Next, claim a slot and fill Studio."
         return "Every field is written. Save to Studio when you're ready."
     if step == "submit":
         nb = len((submit or {}).get("blockers") or [])
         nc = len((submit or {}).get("calls") or [])
+        dr = (submit or {}).get("draft")
+        if dr and nb:
+            return f"{_cap(_number_word(nb))} {'thing' if nb == 1 else 'things'} to fix, then claim a slot."
+        if dr:
+            n = int(dr.get("open") or 0)
+            return ("Claim a slot. Everything here goes to Studio in one press." if n else
+                    "Everything is ready. No open slot matches yet; johto says when one opens.")
         if nb:
             return f"{_cap(_number_word(nb))} {'thing' if nb == 1 else 'things'} to fix before you submit."
         if (submit or {}).get("can_submit"):
@@ -1571,6 +1620,12 @@ async def review_post(req: Request):
     turn = b.get("turn")
     if turn is not None and (not isinstance(turn, int) or isinstance(turn, bool) or turn < 0 or turn > 999):
         raise ApiError(400, "invalid", "Bad turn.")
+    # Re-enter a review (his press): true takes back the newest saved review of the run, a name takes back that
+    # one; the new text then takes its place and the findings are read again. The new text is checked above
+    # before anything is removed.
+    replace = b.get("replace")
+    if replace is not None and replace is not False and replace is not True and not (isinstance(replace, str) and replace):
+        raise ApiError(400, "invalid", "replace is true or a saved review's name.")
 
     def save():
         rv = importlib.import_module("johto.reviews")
@@ -1578,7 +1633,17 @@ async def review_post(req: Request):
         r = run or name
         if not r or not (d / "runs" / r).is_dir():
             raise ApiError(404, "not_found", "There is no run to attach the review to.")
+        gone = None
+        if replace:
+            mine = [x for x in rv.list_reviews(d) if x.get("run") == r]
+            old = next((x for x in mine if x["name"] == replace), None) if isinstance(replace, str) else \
+                (mine[-1] if mine else None)
+            if old is None:
+                raise ApiError(404, "not_found", "There is no saved review of this run to replace.")
+            gone = rv.remove(d, old["name"])
         n = turn
+        if n is None and gone and isinstance(gone.get("turn"), int):
+            n = gone["turn"]   # the new reply stands where the old one stood
         if n is None:
             sub = next((x for x in t.get("runs") or [] if x.get("name") == r), {})
             n = (sub.get("facts") or {}).get("turns")
@@ -1586,16 +1651,20 @@ async def review_post(req: Request):
         pm = _plain_mod()
         if pm is not None and callable(getattr(pm, "ensure", None)):
             _safe(lambda: pm.ensure(d), None)
-        return p, r, n
-    path, r, n = await asyncio.to_thread(save)
+        return p, r, n, gone
+    path, r, n, gone = await asyncio.to_thread(save)
     try:
         from .api_actions import task_changed
         task_changed(d.name, ["grading", "reviews"])
     except Exception:  # noqa: BLE001
         pass
-    words = f"Saved the review of {run_words(r)}" + (f", turn {n}" if n else "") + "."
+    words = f"{'Replaced' if gone else 'Saved'} the review of {run_words(r)}" + (f", turn {n}" if n else "") + "."
+    if gone and gone.get("dropped"):
+        k = len(gone["dropped"])
+        words += f" {k} finding{'s' if k != 1 else ''} from the old reply {'are' if k != 1 else 'is'} gone."
     return JSONResponse({"toast": {"id": _oid("review", path), "level": "ok", "text": words, "undo": None,
-                                   "link": None}, "review": {"name": Path(path).name, "turn": n}})
+                                   "link": None}, "review": {"name": Path(path).name, "turn": n},
+                         "replaced": {"name": gone["name"], "dropped": gone["dropped"], "kept": gone["kept"]} if gone else None})
 
 
 def _copy(text: str) -> bool:

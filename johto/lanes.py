@@ -204,8 +204,9 @@ def new_lane(task_dir: Path, kind: str, stop_others: bool = False) -> Path:
     slot = _pick_slot(stop_others)
     run_dir = next_run_dir(task_dir, kind)
     run_dir.mkdir(parents=True)
-    cmd = [PREWORK, "setup", "--task", meta["task_name"], "--repo", meta["repo"]["pinned_url"]]
-    print(f"Setting up {run_dir.name} for {meta['task_name']} at {meta['repo']['commit'][:8]}...")
+    lane_task = workspace.lane_task(meta, task_dir)
+    cmd = [PREWORK, "setup", "--task", lane_task, "--repo", meta["repo"]["pinned_url"]]
+    print(f"Setting up {run_dir.name} for {lane_task} at {meta['repo']['commit'][:8]}...")
     if slot:
         print(f"Another lane is running, so this one is the second lane: its dev servers open at host ports "
               f"{slot_label(slot)}, not {slot_label(0)}.")

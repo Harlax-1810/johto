@@ -158,6 +158,19 @@ function footFacts(f) {
   return out.join(" · ");
 }
 
+/** Put text on the clipboard; falls back to a hidden textarea where the clipboard API is not allowed. */
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); return true; } catch {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.setAttribute("readonly", ""); ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand("copy");
+    ta.remove();
+    return ok;
+  } catch { return false; }
+}
+
 // The drawer's state action, run by ⌘⇧↵ while focus is in the drawer (the terminal included).
 let drawerPrimary = null;
 export function runDrawerPrimary() { if (drawerPrimary) { drawerPrimary(); return true; } return false; }
@@ -169,14 +182,22 @@ const nextRun = (l) => (l.queue || []).find((q) => q.kind !== "calib" || app.val
 function laneActions(l, ptyLocked, collecting) {
   const run = l.run;
   const s = l.state;
-  const out = { main: null, end: null };
+  const out = { main: null, end: null, copy: null };
   const typing = (what, okText) => async () => {
     const r = await act("/api/lane/type", { what }, { quiet: true });
     if (r == null) return;
     if (r.toast) toast(r.toast.text, r.toast); else if (okText) toast(okText);
     focusTerminal();
   };
-  if (s === "needs_login") out.main = { label: "Type /login", run: typing("login", "Typed /login. Finish signing in in the browser tab it opens."), title: "Types /login and Enter in the lane" };
+  if (s === "needs_login" && l.login_url) {
+    // The lane printed its sign-in link. The screen wraps it, so copying it out of the terminal loses pieces;
+    // the server joins it back and these two use the whole link.
+    const url = l.login_url;
+    out.main = { label: "Open the sign-in link", title: "Opens Claude's sign-in link in a new tab. Paste the code it gives you into the lane.",
+      run: () => { window.open(url, "_blank", "noopener"); toast("Sign in there, then paste the code into the lane."); focusTerminal(); } };
+    out.copy = { label: "Copy the link", title: "Copies the whole sign-in link",
+      run: async () => { toast((await copyText(url)) ? "Copied the sign-in link." : "Could not copy. Select it in the lane instead.", { level: "ok" }); } };
+  } else if (s === "needs_login") out.main = { label: "Type /login", run: typing("login", "Typed /login. Finish signing in in the browser tab it opens."), title: "Types /login and Enter in the lane" };
   // Once text sits in Claude's input box, a paste or /exit would land on top of it (the server refuses both).
   else if (s === "ready_for_prompt" && l.input?.empty !== false) out.main = { label: "Paste my prompt", run: typing("prompt", "Pasted your saved Opening Prompt. Press Enter in the lane to send it."), title: "Pastes your saved Opening Prompt without pressing Enter" };
   else if (s === "free" && nextRun(l)) {
@@ -328,6 +349,7 @@ export function LaneDrawer() {
         ${locked ? html`<span class=${`chip neutral ${flash ? "flash" : ""}`} title="After the opening prompt on a one-message task, Enter is held back so nothing else is sent. ⌘K: Unlock lane input">Input locked</span>` : null}
         ${busy ? html`<span class="djob"><span class="dot busy"></span>${afterRunLine(busy)} <span class="num">${clock(busy.started_at || busy.created_at)}</span></span>` : null}
         <span style="flex:1"></span>
+        ${acts.copy ? html`<button class="btn sm" onClick=${acts.copy.run} title=${acts.copy.title}>${acts.copy.label}</button>` : null}
         ${acts.main ? html`<button class="btn sm primary" onClick=${acts.main.run} title=${acts.main.title}><${Kbd} k="⌘⇧↵" />${acts.main.label}</button>` : null}
       </div>
     </div>

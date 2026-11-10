@@ -257,6 +257,39 @@ class View(Tmp):
         self.assertIn("lane_now", prompt)
         self.assertNotIn("{inputs}", prompt)
 
+    def test_the_research_is_sorted_by_the_field_it_bears_on(self):
+        # Before the document exists, the Write step's panel has the dossier and brief; with it, the research too.
+        d = self.task()
+        f = U.for_fields(U.research(d), None)
+        self.assertEqual(set(f), {"goal", "decision_points", "codebase", "initial_state"})
+        self.assertEqual([g["source"] for g in f["goal"]], ["dossier", "brief"])
+        self.assertEqual(f["goal"][1]["items"], [{"text": "A bad import wrecked 300 counts."}])
+        self.assertEqual(f["initial_state"][0]["items"][0]["text"], "Initial state: a stack with 300 parts.")
+        self.assertEqual(f["decision_points"], [])                 # nothing in that dossier about models
+        U._write(d, {"schema": U.SCHEMA_ID, "action": "Operate", "doc": P.EXAMPLE, "inputs_sha": U.inputs_sha(U.research(d))})
+        f = U.for_fields(U.research(d), U.load(d))
+        self.assertEqual(f["goal"][0], {"head": "The task in a nutshell", "source": "research",
+                                        "items": [{"text": P.EXAMPLE["headline"]}]})
+        heads = {g["head"]: g for g in f["codebase"]}
+        code = heads["Where in the code"]["items"]
+        self.assertEqual(code[0]["path"], P.EXAMPLE["code"][0]["path"])
+        self.assertEqual(code[0]["text"], P.EXAMPLE["code"][0]["what"])
+        self.assertEqual(heads["Words a newcomer misreads"]["items"][0]["text"],
+                         f"{P.EXAMPLE['terms'][0]['term']}: {P.EXAMPLE['terms'][0]['means']}")
+        self.assertEqual([x["text"] for x in {g["head"]: g for g in f["decision_points"]}["The hard part"]["items"]],
+                         P.EXAMPLE["hard"])
+        parts = {g["head"]: g for g in f["initial_state"]}["The parts of the starting state"]["items"]
+        self.assertTrue(parts[0]["text"].startswith(P.EXAMPLE["kind"]["starting_state"][0]["part"] + ": "))
+        # A Modify task has no Initial state field, so nothing is sorted under it.
+        m = self.task("mod00001", action="Modify")
+        self.assertEqual(U.for_fields(U.research(m), None)["initial_state"], [])
+        # Every item is a fact to read, never a drafted field: no group text is longer than the research it quotes.
+        for groups in f.values():
+            for g in groups:
+                for it in g["items"]:
+                    self.assertTrue(it["text"])
+                    self.assertNotIn("\n", it["text"])
+
     def test_each_type_has_a_guide_and_schema(self):
         for a in P.ACTIONS:
             self.assertIn(a, P.TYPE_GUIDE)
@@ -390,6 +423,7 @@ class Api(Tmp):
             body = json.loads(r.body)
             self.assertEqual(body["state"], "missing")
             self.assertEqual(body["action"], "Operate")
+            self.assertEqual(body["fields"]["goal"][0]["source"], "dossier")   # the Write step's panel
             self.assertEqual(asyncio.run(A.get_understand(req("nope"))).status_code, 404)
             self.assertEqual(asyncio.run(A.get_understand(req("../x"))).status_code, 404)
 

@@ -1,5 +1,40 @@
 # johto
 
+> **About this fork.** johto was written by [Austin Wallace](https://github.com/austeane) and published at
+> [austeane/johto](https://github.com/austeane/johto); the design and almost all of the code here is his, and
+> his commits and authorship are kept unchanged in this repository's history. This copy is maintained by
+> Harlax Group for its own Johto work. The patches below sit on top of his work and are listed so the two can be
+> told apart.
+
+## Patches in this fork
+
+Changes made on top of austeane/johto (November 2026):
+
+- **Tasks without a slot.** A task can be started, run in a lane, written up and checked before any slot is open;
+  when a matching slot appears the app offers a one-press claim that fills Studio and runs AutoQC. Drafts get lane
+  names that Mercor's `prework.py` accepts, and their gists are named after the Studio code once claimed.
+- **Research dashboard.** `/research` lists every problem the research found across every repo, with filters for
+  how likely Claude is to get it in one go, size, task kind, domain, codebase type, language, the repo verdict,
+  whether a slot is open now, prompt style and mode, plus search and sortable columns. Also `GET /api/research`.
+- **Who writes dossiers.** The `dossier_model` setting picks the research engine per repo: `claude` (headless
+  Claude Code, the original) or `codex` (OpenAI's Codex CLI running read-only inside the clone, GPT-6.1 Sol at
+  high effort by default). Switch from the Research menu, the command palette or `johto dossier model`. Scouting
+  and repo briefs stay with Claude Code.
+- **Task budget in the research prompts.** Every dossier and brief prompt states that the agent under test is
+  Claude Opus at high effort and that an async task is one prompt worked alone for about 45 minutes, so bounded
+  tasks are sized to that.
+- **Lane sign-in link.** The Claude sign-in URL is read out of the lane pane on the server (claude.ai and
+  claude.com hosts, wrapped lines joined), and the lane drawer offers "Open the sign-in link" and "Copy the link".
+- **Reviews.** A button to re-enter a review; GPT Pro review replies can be read from OpenAI Responses JSON;
+  the Write step has a Research panel; gist uploads retry; the `gh` account is configurable (`gh_account` in
+  `studio-ids.json`); Studio starts are started then polled.
+- **Smaller fixes.** Slot and task files are resolved at call time so fake mode never writes into the real data
+  folder; the browser tab helper takes an account; pane fixtures for the sign-in states.
+
+The original README follows.
+
+---
+
 Busywork automation for writers on Mercor's Project Johto pre-work tasks. You write the opening
 prompt, goal, decision points, codebase notes and validation notes yourself. `johto` handles the
 rest:

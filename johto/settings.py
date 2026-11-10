@@ -14,6 +14,13 @@ DEFAULTS = {
     "budget_nudges": [45, 75, 90],
     # Chrome profile whose ChatGPT has Pro. Studio runs in the same profile.
     "chatgpt_account": config.BROWSER_ACCOUNT,
+    # Who writes repo dossiers (johto/dossier): "claude" (headless Claude Code in the clone) or "codex" (the Codex CLI,
+    # GPT in the clone, read-only). Scouting and repo briefs stay with Claude.
+    "dossier_model": "claude",
+    # With dossier_model "codex": the model and reasoning effort passed to `codex exec` ("" keeps Codex's own config).
+    # Austin, 2026-11-10: research runs on GPT-6.1 Sol at high effort.
+    "codex_model": "gpt-6.1-sol",
+    "codex_effort": "high",
     # Note in the review notification when ChatGPT's weekly usage banner shows less than this percent left. None:
     # never (Austin, 2026-11-01: reviews always go out; the ChatGPT app's usage isn't a limit for him).
     "chatgpt_warn_usage_pct": None,

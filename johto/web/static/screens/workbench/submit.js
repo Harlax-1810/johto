@@ -7,7 +7,7 @@ import { AiTag, Btn, Dot, Flag } from "../../components/primitives.js";
 import { useConfirm, useJob } from "../../lib/actions.js";
 import { jobLine } from "../../lib/store.js";
 import { numberWord } from "./words.js";
-import { usePrimary } from "./data.js";
+import { usePrimary, claimSlot, refreshStudio } from "./data.js";
 
 /** "One thing to fix", "Three calls to make". */
 const count = (n, one, many) => `${numberWord(n)} ${n === 1 ? one : many}`;
@@ -54,6 +54,47 @@ export function Sent({ sub, onAction, title = "What gets sent", quiet }) {
     <h3 class="wb-h3">${title}</h3>
     <dl>${(sub.sent || []).map((r) => html`<dt>${r.field ? html`<button type="button" class="linkbtn" onClick=${() => onAction(r.field === "ratings" ? "rate" : `focus_field:${r.field}`)}>${r.label}</button>` : r.label}</dt>
       <dd class=${r.tone}>${r.value}${r.pass_rule ? html`<span class="faint"> · ${r.pass_rule}</span>` : null}</dd>`)}</dl>
+  </section>`;
+}
+
+/** A draft: Claim a slot and fill Studio (one press), then Submit for review once Mercor's checks pass. */
+export function DraftSteps({ short, task, sub, studio, onAction, red }) {
+  const claiming = useJob(["claim_slot"], short);
+  const looking = useJob(["slots_sync"], null);
+  const d = studio?.draft || sub.draft || {};
+  const open = d.open || 0;
+  const blockers = (sub.blockers || []).length;
+  const can = open > 0 && !blockers && !red && !claiming;
+  const claim = () => { if (can) claimSlot(short, task, { onRed: (o) => onAction(o.key === "opening_prompt" ? "open_prompt" : `focus_field:${o.key}`) }); };
+  usePrimary(() => claim());
+  const why = red ? "Waits until you reword the words that match AI text, or mark them as your own."
+    : blockers ? "Fix the items on the left first." : open ? "" : "No open slot matches right now. Johto looks every ten minutes and says when one opens.";
+  return html`<section class="wb-steps">
+    <div class="wb-step now">
+      <div class="wb-step-n">1</div>
+      <div class="wb-step-b">
+        <div class="wb-step-h"><h3>Claim a slot and fill Studio</h3><span class="wb-step-s">${sub.save_state}</span></div>
+        <p class="wb-step-w">${sub.save_words}</p>
+        ${d.slot_words ? html`<p class="wb-step-w wb-slotw">Needs a slot seeded <b>${d.slot_words}</b>.</p>` : null}
+        <div class="wb-acts">
+          <${Btn} kind="primary" label=${claiming ? "Claiming…" : "Claim a slot and fill Studio"} k=${can ? "⌘⇧↵" : null}
+            disabled=${!can} onClick=${claim} title=${why || "Claims one open slot, then saves everything here to Studio"} />
+          <${Btn} size="sm" kind="quiet" label=${looking ? "Looking…" : "Look for open slots now"} disabled=${!!looking || !!claiming}
+            onClick=${() => refreshStudio(short)} title="Reads Studio's open slots again" />
+        </div>
+        ${why ? html`<p class=${`wb-why ${red ? "stop" : ""}`}>${why}</p>` : null}
+      </div>
+    </div>
+    <div class="wb-step">
+      <div class="wb-step-n">2</div>
+      <div class="wb-step-b">
+        <div class="wb-step-h"><h3>Submit for review</h3></div>
+        <p class="wb-step-w">Sends the task to a Mercor reviewer. It can't be undone.</p>
+        <div class="wb-acts"><${Btn} kind="secondary" label="Submit for review" disabled=${true} title="Claim a slot first" /></div>
+        <p class="wb-why">Claim a slot first. Once Mercor's checks pass, this step opens.</p>
+      </div>
+    </div>
+    ${claiming ? html`<p class="wb-job"><${Dot} tone="busy" />${jobLine(claiming)}</p>` : null}
   </section>`;
 }
 
@@ -119,7 +160,9 @@ export function SubmitStep({ short, task, wb, onAction, onSave, readOnly }) {
       <${Checklist} sub=${sub} onAction=${onAction} readOnly=${readOnly} />
     </div>
     <div class="wb-col">
-      ${readOnly ? null : html`<${SubmitSteps} short=${short} sub=${sub} studio=${wb.studio} onSave=${onSave} onAction=${onAction} red=${redOverlaps(task)} />`}
+      ${readOnly ? null : wb.studio?.draft
+        ? html`<${DraftSteps} short=${short} task=${task} sub=${sub} studio=${wb.studio} onAction=${onAction} red=${redOverlaps(task)} />`
+        : html`<${SubmitSteps} short=${short} sub=${sub} studio=${wb.studio} onSave=${onSave} onAction=${onAction} red=${redOverlaps(task)} />`}
       <${Sent} sub=${sub} onAction=${onAction} />
       ${readOnly ? null : html`<div class="wb-deep">
         <${Btn} kind="quiet" size="sm" label="Deep check my writing" onClick=${() => onAction("deep_check")} />

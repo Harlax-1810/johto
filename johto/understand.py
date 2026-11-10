@@ -1000,6 +1000,104 @@ def _fallback(r: dict) -> dict:
             "problem": seed.get("problem"), "today": [x for x in det.get("today") or [] if isinstance(x, str)][:4]}
 
 
+# --- the research, sorted by the field it bears on ------------------------------------------------------------
+
+FIELD_HEADS = {
+    "goal": "Goal", "decision_points": "Decision points", "codebase": "Codebase understanding",
+    "initial_state": "Initial state",
+}
+
+
+def _strs(v, n: int = 10) -> list[str]:
+    return [x.strip() for x in (v or []) if isinstance(x, str) and x.strip()][:n]
+
+
+def _group(head: str, items, *, source: str = "research", note: str | None = None) -> dict | None:
+    """One block of the field panel: {head, source, items: [{text, path?}], note?}. None when it has nothing."""
+    out = []
+    for it in items or []:
+        if isinstance(it, str):
+            if it.strip():
+                out.append({"text": it.strip()})
+        elif isinstance(it, dict) and str(it.get("text") or "").strip():
+            out.append({k: v for k, v in it.items() if k in ("text", "path", "url") and v})
+    if not out:
+        return None
+    g = {"head": head, "source": source, "items": out}
+    if note:
+        g["note"] = note
+    return g
+
+
+def for_fields(r: dict, doc: dict | None) -> dict:
+    """The research material behind each of Austin's written fields, read-only and by source: Claude's task
+    understanding ("research"), the dossier opportunity the task was cut from ("dossier") and the repo brief's seed
+    ("brief"). {field: [group]}, every group {head, source, items: [{text, path?, url?}], note?}. Facts to look at
+    while he writes, never wording for the field: nothing here is drafted for pasting."""
+    d = (doc or {}).get("doc") or {}
+    opp = r.get("opportunity") or {}
+    seed = r.get("seed") or {}
+    det = seed.get("detail") or {}
+    bt = opp.get("bounded_task") or {}
+    kind = d.get("kind") or {}
+    today = d.get("today") or {}
+    real = d.get("real") or {}
+    up = d.get("upstream") or {}
+    ov = r.get("overview") or {}
+    proj = r.get("project") or {}
+    action = r.get("action")
+
+    goal = [
+        _group("The task in a nutshell", [d.get("headline")]),
+        _group("Claude's job and what done looks like", [d.get("job"), d.get("done")]),
+        _group("The scene", [d.get("story")]),
+        _group("The opportunity it was cut from", [opp.get("title"), opp.get("ambition"), bt.get("shape")], source="dossier"),
+        _group("The problem in plain words", [seed.get("problem")], source="brief"),
+        _group("Missing or broken today", _strs(today.get("missing"), 4)),
+    ]
+    decision = [
+        _group("The hard part", _strs(d.get("hard"), 5),
+               note="Why a careful engineer still gets it wrong. Name the forks here, keep the diagnosis out of the prompt."),
+        _group("Where models go wrong", _strs(opp.get("where_models_fail"), 6), source="dossier"),
+        _group("What models get wrong", _strs(det.get("models_wrong"), 4) + _strs([seed.get("models_miss")], 1), source="brief"),
+        _group("One-shot odds", [" ".join(x for x in (
+            f"{(opp.get('one_shot') or {}).get('likelihood', '').capitalize()}." if (opp.get("one_shot") or {}).get("likelihood") else "",
+            (opp.get("one_shot") or {}).get("why") or "") if x).strip()], source="dossier"),
+        _group("Not confirmed", _strs(d.get("unsure"), 3)),
+    ]
+    code_items = [{"text": c.get("what"), "path": c.get("path")} for c in d.get("code") or [] if isinstance(c, dict)]
+    ev_items = [{"text": e.get("fact"), "path": e.get("pointer")} for e in opp.get("evidence") or [] if isinstance(e, dict)]
+    threads = [{"text": f"{t.get('changed', '')} {t.get('bearing', '')}".strip(), "url": t.get("url")}
+               for t in up.get("threads") or [] if isinstance(t, dict)]
+    stack = _strs(ov.get("stack"), 12)
+    run = ov.get("run") or {}
+    codebase = [
+        _group("Where in the code", code_items, note="At the pinned commit."),
+        _group("Evidence in the dossier", ev_items, source="dossier"),
+        _group("How it works today", _strs(today.get("works"), 4) + _strs(today.get("missing"), 4)),
+        _group("Upstream", [up.get("line")] + threads),
+        _group("Words a newcomer misreads", [f"{t.get('term')}: {t.get('means')}" for t in d.get("terms") or []
+                                             if isinstance(t, dict) and t.get("term")]),
+        _group("The project at a glance", [ov.get("what"), ov.get("users"), proj.get("how_it_works"),
+                                           f"Stack: {', '.join(stack)}." if stack else None,
+                                           run.get("notes")], source="dossier"),
+        _group("Why nobody did it yet", [opp.get("why_not_done")], source="dossier"),
+    ]
+    parts = [{"text": f"{p.get('part')}: {p.get('what')}"} for p in kind.get("starting_state") or []
+             if isinstance(p, dict) and p.get("part")]
+    initial = [
+        _group("In the lane right now", [kind.get("lane_now")]),
+        _group("The parts of the starting state", parts),
+        _group("How a reviewer rebuilds it", [kind.get("rebuild"), kind.get("system_not_code")]),
+        _group("Staged for the task", _strs(real.get("made_up"), 4)),
+        _group("The dossier's recipe", [bt.get("check_in_session")], source="dossier",
+               note="Commands and settings as the dossier guessed them, not as the lane ran."),
+        _group("What a reviewer's machine needs", _strs((opp.get("self_contained") or {}).get("needs"), 6), source="dossier"),
+    ] if action == "Operate" else []
+    out = {"goal": goal, "decision_points": decision, "codebase": codebase, "initial_state": initial}
+    return {k: [g for g in v if g] for k, v in out.items()}
+
+
 def view(d: Path) -> dict:
     d = Path(d)
     r = research(d)
@@ -1028,6 +1126,7 @@ def view(d: Path) -> dict:
         "meta": {k: doc.get(k) for k in ("generated_at", "elapsed_s", "title", "commit", "repo")} if doc else None,
         "facts": doc.get("facts") if doc else None,
         "fallback": _fallback(r),
+        "fields": for_fields(r, doc),
         "rules": rules_for(r["action"]),
         "notes": TYPE_NOTES.get(r["action"], []),
         "precedent": prec,

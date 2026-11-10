@@ -14,6 +14,8 @@ import { Palette, KeyOverlay, Toasts, registerPalette } from "./components/overl
 // Each route's entry module is owned by one builder (spec.md 2.2 and 10). This file is frozen (lead).
 import Now, { opensLane } from "./screens/now.js";
 import Discover from "./screens/discover/index.js";
+import Research from "./screens/discover/research.js";
+import { listing, setModel, RESEARCH_MODELS } from "./screens/discover/data.js";
 import Workbench from "./screens/workbench/index.js";
 import Finished from "./screens/finished.js";
 
@@ -68,6 +70,7 @@ registerSequence("g h", () => navigate("/"));
 registerSequence("g p", () => navigate("/repos"));
 registerSequence("g r", () => navigate("/repos"));
 registerSequence("g s", () => navigate("/repos", "#slots"));
+registerSequence("g a", () => navigate("/research"));
 registerSequence("g f", () => navigate("/finished"));
 
 // ⌘Z outside text fields undoes the newest undo window (claims, hides). Inside a field it stays the
@@ -152,6 +155,9 @@ registerPalette(() => {
   return [
     { id: "nav-home", group: "Go", label: "Now", key: "g h", run: () => navigate("/") },
     { id: "nav-repos", group: "Go", label: "Find work", key: "g p", run: () => navigate("/repos") },
+    { id: "nav-research", group: "Go", label: "Research: every problem", key: "g a", run: () => navigate("/research") },
+    ...RESEARCH_MODELS.filter(([k]) => k !== ((listing.value?.research || {}).model || "claude"))
+      .map(([k, word]) => ({ id: `research-model-${k}`, group: "Go", label: `Research: write dossiers with ${word}`, run: () => setModel(k) })),
     { id: "nav-fin", group: "Go", label: "Submitted", key: "g f", run: () => navigate("/finished") },
     { id: "lane", group: "Lane", label: "Open the lane", key: "⌃`", run: () => openDrawer("user") },
     { id: "ghostty", group: "Lane", label: "Open lane in Ghostty", enabled: !!l.run, why: "no lane is running",
@@ -177,6 +183,7 @@ function Screen({ r }) {
   if (r === "/") return html`<${Now} />`;
   if (r.startsWith("/repos") || r.startsWith("/pick")) return html`<${Discover} id=${r.split("/")[2] || null} />`;
   if (r.startsWith("/scout")) return html`<${Discover} scout=${true} />`;
+  if (r.startsWith("/research")) return html`<${Research} />`;
   if (r.startsWith("/finished")) return html`<div class="frame"><${Finished} /></div>`;
   if (r.startsWith("/task/")) return html`<${Workbench} short=${r.split("/")[2]} />`;
   return html`<${Now} />`;

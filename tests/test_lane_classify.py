@@ -269,3 +269,26 @@ class ProcessAndLockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LoginUrl(unittest.TestCase):
+    """The sign-in link is stitched back from the wrapped screen lines, so the drawer can open or copy it whole."""
+
+    def test_wrapped_link_is_joined(self):
+        scr = screen((PANES / "login_url.txt").read_text())
+        self.assertEqual(scr["login_url"], (PANES / "login_url.expected").read_text())
+        self.assertTrue(scr["login_screen"] and scr["login"])
+
+    def test_the_claude_com_link_at_column_zero_is_joined_too(self):
+        scr = screen((PANES / "login_url_claude_com.txt").read_text())
+        self.assertEqual(scr["login_url"], (PANES / "login_url_claude_com.expected").read_text())
+
+    def test_no_link_on_other_screens(self):
+        for name in ("login_method.txt", "not_logged_in.txt", "ready_logged_in.txt", "permission.txt"):
+            self.assertIsNone(screen((PANES / name).read_text())["login_url"], name)
+
+    def test_a_link_followed_by_prose_stops_at_the_line(self):
+        lines = ["  https://claude.ai/oauth/authorize?code=true&state=abc is the link", "  nextlinewords"]
+        self.assertEqual(monitor.login_url(lines), "https://claude.ai/oauth/authorize?code=true&state=abc")
+        self.assertEqual(monitor.login_url(["  https://claude.ai/oauth/authorize?code=true", "", "  Paste code here"]),
+                         "https://claude.ai/oauth/authorize?code=true")

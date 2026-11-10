@@ -10,7 +10,7 @@ import { registerPalette } from "../../components/overlays.js";
 import { pushContext } from "../../lib/keys.js";
 import { flushFields } from "../../components/field.js";
 import { useWorkbench, saveToStudio, rerunQc, refreshStudio, deepCheck, revealLog, collectRun, laneHere,
-  plainMessage, useLiveJob, finishWriting, dropTask } from "./data.js";
+  plainMessage, useLiveJob, finishWriting, dropTask, claimSlot, deleteDraft } from "./data.js";
 import { slotLine, FIELD_NAME, FIELD_LOWER } from "./words.js";
 import { sourceWords } from "../../components/field.js";
 import { drops } from "../surfaces/decide.js";
@@ -85,8 +85,9 @@ function Header({ short, task, wb, view, onSave, onAction, onDetails, readOnly }
   const [armed, arm, clear] = useHeaderArm();
   const saving = useLiveJob(["save", "studio_save"], short);
   const st = wb.studio || {};
+  const draft = !!st.draft;                           // no Studio slot yet: nothing here can be saved there
   const fromWrite = ["write", "submit"].includes(wb.step) && !readOnly;
-  const saveHere = fromWrite && view !== "submit";   // the Submit step has its own Save to Studio
+  const saveHere = fromWrite && view !== "submit" && !draft;   // the Submit step has its own Save to Studio
   const runs = (wb.run?.runs || []).filter((r) => r.collected);
   const here = !!laneHere(short);
   const mine = !AFTER.has(wb.stage) && st.status !== "Ready to Claim";
@@ -117,6 +118,13 @@ function Header({ short, task, wb, view, onSave, onAction, onDetails, readOnly }
       if (r?.toast) toast(r.toast.text, r.toast); else toast("Cleaning the lanes", { level: "info" });
     } catch (e) { toast(plainMessage(e.message), { level: "error" }); }
   }
+  async function removeDraft() {
+    const r = await deleteDraft(short, {
+      onArm: (summary, secs) => arm("Press again to delete this draft", removeDraft, secs || 6, summary || ""),
+      onDisarm: clear,
+    });
+    if (r !== "armed") clear();
+  }
   async function logged() {
     try { const r = await api.post(`/api/tasks/${short}/discard-logged`, {}); toast(r?.toast?.text || "Marked as logged", { level: "ok" }); }
     catch (e) { toast(plainMessage(e.message), { level: "error" }); }
@@ -136,14 +144,16 @@ function Header({ short, task, wb, view, onSave, onAction, onDetails, readOnly }
 
   const items = [
     runs.length > 1 ? { label: "Use another run for Studio", run: onDetails } : null,
-    { label: "Refresh from Studio", run: () => refreshStudio(short) },
+    { label: draft ? "Look for open slots" : "Refresh from Studio", run: () => refreshStudio(short) },
     { label: "Understand this task", run: () => navigate(`/task/${short}/understand`) },
     wb.origin?.dossier_id ? { label: "Repo research", run: () => navigate(`/repos/${wb.origin.dossier_id}`) } : null,
     "-",
     (task.runs || []).length ? { label: "Clean lanes", run: () => clean(false), disabled: here, why: "The lane is running this task." } : null,
     discardOpen ? { label: "I logged the discarded run", run: logged } : null,
     mine && collected && !drops.value[short] ? { label: "Drop the task", danger: true, run: () => dropTask(short, task) } : null,
-    mine ? { label: "Unclaim in Studio", danger: true, run: unclaim } : null,
+    mine && !draft ? { label: "Unclaim in Studio", danger: true, run: unclaim } : null,
+    draft && !AFTER.has(wb.stage) ? { label: "Delete this draft", danger: true, run: removeDraft, disabled: here,
+      why: "The lane is running this task." } : null,
   ].filter(Boolean);
   while (items.length && items[items.length - 1] === "-") items.pop();
 
@@ -154,10 +164,10 @@ function Header({ short, task, wb, view, onSave, onAction, onDetails, readOnly }
     </div>
     <div class="wb-head-r">
       ${armed ? html`<${Btn} kind="danger" size="sm" label=${armed.label} title=${armed.title || ""} onClick=${() => armed.run()} />` : null}
-      ${fromWrite ? html`${red && saveHere && !saving
+      ${fromWrite || draft ? html`${red && saveHere && !saving
           ? html`<button type="button" class="linkbtn wb-st stop" title="Reword it, or mark it as your own"
               onClick=${() => onAction(red.key === "opening_prompt" ? "open_prompt" : `focus_field:${red.key}`)}>${redWhy(red)}</button>`
-          : html`<span class="wb-st">${saving ? "Saving to Studio…" : st.words}</span>`}
+          : html`<span class=${`wb-st ${draft ? "draft" : ""}`} title=${draft ? "This task has no Studio slot yet. Claim one from the Submit step." : ""}>${saving ? "Saving to Studio…" : st.words}</span>`}
         ${saveHere ? html`<${Btn} kind="secondary" size="sm" label="Save to Studio" disabled=${!!saving || !!red}
           title=${red ? "Waits until you reword the words that match AI text, or mark them as your own" : "Save to Studio"}
           onClick=${onSave} />` : null}` : null}
